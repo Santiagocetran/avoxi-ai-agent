@@ -22,7 +22,7 @@ if (!question) {
 }
 
 const avoxiConfig = loadAvoxiConfig();
-const { client, model } = buildLlmClient(loadLlmConfig());
+const { client, model } = await buildLlmClient(loadLlmConfig());
 
 console.log(chalk.gray(`\nQuery: ${question}`));
 console.log(chalk.gray(`Model: ${model}\n`));

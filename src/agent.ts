@@ -6,6 +6,7 @@
 
 import type OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions.js';
+import type { ClaudeAdapter } from './llm-claude.js';
 import { TOOLS, dispatchTool } from './tools/index.js';
 import { buildSystemPrompt } from './prompts/system.js';
 import type { AvoxiConfig } from './tools/avoxi.js';
@@ -13,7 +14,7 @@ import type { AvoxiConfig } from './tools/avoxi.js';
 const MAX_TOOL_ROUNDS = 8;
 
 export interface AgentRunOptions {
-  llmClient: OpenAI;
+  llmClient: OpenAI | ClaudeAdapter;
   model: string;
   avoxiConfig: AvoxiConfig;
   userPrompt: string;

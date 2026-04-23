@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/cli.ts",
     "monitor": "tsx src/monitor.ts",
+    "dashboard": "tsx src/dashboard/server.ts",
     "query": "tsx src/cli.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
@@ -19,7 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
-    "@types/node-cron": "^3.0.11",
+    "@types/node-cron": "^20.0.0",
     "tsx": "^4.15.7",
     "typescript": "^5.5.3"
   },

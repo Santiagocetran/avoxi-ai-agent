@@ -8,10 +8,13 @@
 
 An AI-powered VoIP operations monitoring agent for GrupoWellnessLatina. It connects to the **AVOXI telephony API** and uses an **LLM with function-calling** (tool use) to autonomously diagnose call quality issues, detect anomalies, and report health status in plain language.
 
-Two operating modes:
+Three operating modes:
 
-- **CLI** — answer ad-hoc questions: `pnpm query "why are calls failing?"`
-- **Monitor** — background daemon that runs health checks on a cron schedule (default: every 5 min)
+| Mode | Command | Description |
+|---|---|---|
+| **CLI** | `pnpm query "…"` | Ad-hoc question answered once and exit |
+| **Monitor** | `pnpm monitor` | Background cron daemon, prints to stdout |
+| **Dashboard** | `pnpm dashboard` | Web UI + cron daemon at `http://localhost:3000` |
 
 ---
 
@@ -19,76 +22,169 @@ Two operating modes:
 
 ```
 avoxi-ai-agent/
-├── .env.example          ← all configurable variables with defaults
-├── .gitignore            ← excludes node_modules/, dist/, .env
-├── package.json          ← deps + pnpm scripts
-├── tsconfig.json         ← TypeScript: ES2022, NodeNext, strict
-├── README.md             ← usage docs
+├── .env.example               ← all configurable variables with defaults
+├── .gitignore                 ← excludes node_modules/, dist/, .env
+├── package.json               ← deps + pnpm scripts
+├── tsconfig.json              ← TypeScript: ES2022, NodeNext, strict
+├── README.md                  ← usage docs
+├── PROJECT_REPORT.md          ← this file
+├── web/
+│   └── index.html             ← single-page dashboard UI (vanilla JS, no framework)
 └── src/
-    ├── agent.ts          ← core multi-turn LLM loop (max 8 rounds)
-    ├── cli.ts            ← entry point: pnpm query "<question>"
-    ├── monitor.ts        ← entry point: pnpm monitor (cron daemon)
-    ├── config.ts         ← env var loader & validator
-    ├── llm.ts            ← LLM client factory (Kimi or Hermes)
+    ├── agent.ts               ← core multi-turn LLM loop (max 8 rounds)
+    ├── cli.ts                 ← entry point: pnpm query "<question>"
+    ├── monitor.ts             ← entry point: pnpm monitor (cron daemon → stdout)
+    ├── config.ts              ← env var loader & validator
+    ├── llm.ts                 ← LLM client factory (Kimi / OpenAI / Gemini / Claude)
+    ├── llm-claude.ts          ← Anthropic SDK adapter (skeleton — see below)
     ├── prompts/
-    │   └── system.ts     ← system prompt + health-check instructions
-    └── tools/
-        ├── avoxi.ts      ← AVOXI API client + data models
-        └── index.ts      ← tool schemas (JSON Schema) + dispatcher
+    │   └── system.ts          ← system prompt + health-check instructions
+    ├── tools/
+    │   ├── avoxi.ts           ← AVOXI API client + TypeScript data models
+    │   └── index.ts           ← tool schemas (JSON Schema) + dispatcher
+    └── dashboard/
+        ├── server.ts          ← Express-style HTTP server + SSE + cron loop
+        └── store.ts           ← in-memory state: status, history, activity feed
 ```
 
 ---
 
-## Architecture
+## Full Architecture
 
 ```
 User / Cron trigger
         │
         ▼
- cli.ts or monitor.ts          ← entry points
-        │
-        ▼
-   config.ts                   ← load & validate env vars
-        │
-        ▼
-   llm.ts (buildLlmClient)     ← create OpenAI-compatible client
-        │
-        ▼
-   agent.ts (runAgent)         ← multi-turn loop
-   ┌─────────────────────────────────────────────────┐
-   │  1. Build messages: [system prompt, user query] │
-   │  2. Call LLM with tool schemas                  │
-   │  3. If LLM calls a tool → dispatch it           │
-   │  4. Append tool result → go to step 2           │
-   │  5. If LLM says "stop" → return final answer    │
-   │  (max 8 rounds)                                 │
-   └─────────────────────────────────────────────────┘
-        │
-        ▼
-   tools/index.ts              ← dispatcher routes to:
-        │
-        ├── get_system_health   → avoxi.ts:getSystemHealth
-        ├── get_cdr_summary     → avoxi.ts:getCdrSummary
-        ├── get_cdrs            → avoxi.ts:getCdrs
-        ├── get_active_calls    → avoxi.ts:getActiveCalls
-        ├── get_trunks          → avoxi.ts:getTrunks
-        └── get_dids            → avoxi.ts:getDids
-                │
-                ▼
-        AVOXI REST API v2       ← https://api.avoxi.com/v2
-        Auth: X-API-Key header
+ cli.ts  ──────────────────────────────────────────────────────┐
+ monitor.ts  ──────────────────────────────────────────────┐   │
+ dashboard/server.ts  ──────────────────────────────────┐  │   │
+                                                        │  │   │
+        ▼ (all three share the same core)               │  │   │
+   config.ts                  ← load & validate env vars│  │   │
+        │                                               │  │   │
+        ▼                                               │  │   │
+   llm.ts (buildLlmClient)    ← async factory           │  │   │
+   ├─ kimi    → OpenAI SDK + Moonshot endpoint           │  │   │
+   ├─ openai  → OpenAI SDK native                       │  │   │
+   ├─ gemini  → OpenAI SDK + Google compatible endpoint  │  │   │
+   └─ claude  → llm-claude.ts (ClaudeAdapter) [SKELETON]│  │   │
+        │                                               │  │   │
+        ▼                                               │  │   │
+   agent.ts (runAgent)        ← multi-turn loop         │  │   │
+   ┌─────────────────────────────────────────────────┐  │  │   │
+   │  1. Build messages: [system prompt, user query] │  │  │   │
+   │  2. Call LLM with tool schemas                  │  │  │   │
+   │  3. If LLM calls a tool → dispatch it           │  │  │   │
+   │  4. Fire onToolCall / onToolResult callbacks ───┼──┘  │   │
+   │     (stdout in monitor · SSE events in dashboard)     │   │
+   │  5. Append tool result → go to step 2           │     │   │
+   │  6. If LLM says "stop" → return final answer    │     │   │
+   │  (max 8 rounds)                                 │     │   │
+   └──────────────────────────────────────────────┬──┘     │   │
+                                                  │        │   │
+        ▼                                         │        │   │
+   tools/index.ts             ← dispatcher        │        │   │
+        │                                         │        │   │
+        ├── get_system_health   → avoxi.ts         │        │   │
+        ├── get_cdr_summary     → avoxi.ts         │        │   │
+        ├── get_cdrs            → avoxi.ts         │        │   │
+        ├── get_active_calls    → avoxi.ts         │        │   │
+        ├── get_trunks          → avoxi.ts         │        │   │
+        └── get_dids            → avoxi.ts         │        │   │
+                │                                 │        │   │
+                ▼                                 │        │   │
+        AVOXI REST API v2                         │        │   │
+        Auth: X-API-Key header                    │        │   │
+                                                  │        │   │
+                          ┌───────────────────────┘        │   │
+                          ▼                                │   │
+                  dashboard/store.ts  ← in-memory state    │   │
+                  ├─ currentSeverity                       │   │
+                  ├─ history (last 50 checks)              │   │
+                  ├─ activity (last 30 tool events)        │   │
+                  └─ SSE broadcast to connected browsers   │   │
+                          │                                │   │
+                          ▼                                │   │
+                  dashboard/server.ts                      │   │
+                  ├─ GET /           → web/index.html      │   │
+                  ├─ GET /api/status → JSON                │   │
+                  ├─ GET /api/history → JSON               │   │
+                  └─ GET /events     → SSE stream ─────────┘   │
+                          │                                    │
+                          ▼                                    │
+                  web/index.html ← live UI in browser ─────────┘
 ```
 
 ---
 
 ## LLM Providers
 
-| Provider | Type | Model | Base URL |
-|---|---|---|---|
-| **Kimi (Moonshot AI)** | Cloud | `moonshot-v1-32k` | `https://api.moonshot.cn/v1` |
-| **Hermes 3 (Ollama)** | Local | `hermes3` | `http://localhost:11434/v1` |
+| Provider | Type | Default Model | Base URL | SDK |
+|---|---|---|---|---|
+| **Kimi** (Moonshot AI) | Cloud | `moonshot-v1-32k` | `https://api.moonshot.cn/v1` | `openai` |
+| **OpenAI** | Cloud | `gpt-4o` | `https://api.openai.com/v1` | `openai` |
+| **Gemini** (Google) | Cloud | `gemini-2.0-flash` | `https://generativelanguage.googleapis.com/v1beta/openai/` | `openai` |
+| **Claude** (Anthropic) | Cloud | `claude-sonnet-4-6` | Anthropic API | `@anthropic-ai/sdk` *(adapter)* |
 
-Both use the OpenAI-compatible API format. Switch via `LLM_PROVIDER=kimi|hermes` in `.env`.
+Switch via `LLM_PROVIDER=kimi|openai|gemini|claude` in `.env`.
+
+Kimi, OpenAI, and Gemini all speak the OpenAI-compatible wire format — they share the same `openai` SDK. Claude uses the Anthropic SDK which has a different message format; `src/llm-claude.ts` provides a thin adapter that normalises it to look like an OpenAI client so `agent.ts` needs zero changes.
+
+### Claude Adapter Status (SKELETON)
+
+`src/llm-claude.ts` defines the `ClaudeAdapter` class with pseudo-code comments explaining what each conversion step needs to do:
+
+| Step | OpenAI format | Anthropic format |
+|---|---|---|
+| Tool definitions | `parameters` (JSON Schema) | `input_schema` |
+| Tool results | `role: "tool"` messages | Content blocks inside `role: "user"` |
+| Stop reason | `finish_reason: "stop"` / `"tool_calls"` | `stop_reason: "end_turn"` / `"tool_use"` |
+
+To complete it: `pnpm add @anthropic-ai/sdk`, then implement `_convertTools()`, `_convertMessages()`, and `_convertResponse()` inside the adapter.
+
+---
+
+## Dashboard UI
+
+### What it shows
+
+| Section | Content |
+|---|---|
+| **Status badge** | Current severity (CRITICAL / WARNING / INFO / UNKNOWN) — color-coded, pulses on active alerts |
+| **Last check summary** | Full LLM response text from the most recent health check |
+| **Live activity feed** | Real-time stream of every tool call the agent makes and its results |
+| **Check history table** | Last 50 checks with timestamp, severity, and one-line summary |
+| **Connection indicator** | SSE live / reconnecting |
+
+### How it works
+
+1. `pnpm dashboard` starts `src/dashboard/server.ts`
+2. The server runs the same monitor loop as `pnpm monitor` (same cron, same agent)
+3. Instead of printing to stdout, it pushes events to `src/dashboard/store.ts`
+4. Any browser tab open at `http://localhost:3000` subscribes to `GET /events` (SSE)
+5. The store broadcasts each tool call and check result via SSE in real time
+6. `web/index.html` receives SSE events and updates the UI without page reload
+
+### REST endpoints
+
+| Endpoint | Method | Returns |
+|---|---|---|
+| `/` | GET | Dashboard HTML page |
+| `/api/status` | GET | `{ severity, lastCheckAt }` |
+| `/api/history` | GET | Array of last 50 `CheckResult` objects |
+| `/events` | GET | SSE stream (text/event-stream) |
+
+### SSE event types
+
+| Event type | Payload | When sent |
+|---|---|---|
+| `snapshot` | Full `DashboardState` | On SSE connect (initial load) |
+| `check_result` | `CheckResult` | After each completed health check |
+| `activity` | `ActivityEvent` | On every tool call, tool result, check start/end |
+
+### No external notification dependencies
+
+The dashboard is self-contained: no Slack, no email, no webhooks needed. Any team member opens a browser — they see the current state and live activity. Multiple tabs can be open simultaneously; all receive the same SSE stream.
 
 ---
 
@@ -176,7 +272,7 @@ Both use the OpenAI-compatible API format. Switch via `LLM_PROVIDER=kimi|hermes`
 | **WARNING** | Failure rate 15–40% · Short-call rate ≥ 20% · Trunk >80% capacity · API latency > 2s |
 | **INFO** | Everything within normal range |
 
-Output format from the monitor:
+Output format:
 
 ```
 [SEVERITY] Brief headline
@@ -206,12 +302,17 @@ Output format from the monitor:
 
 | Package | Version | Purpose |
 |---|---|---|
-| `openai` | ^4.52.0 | LLM client (OpenAI-compatible for Kimi & Ollama) |
-| `node-cron` | ^3.0.3 | Cron scheduler for monitor daemon |
+| `openai` | ^4.52.0 | LLM client — used by Kimi, OpenAI, Gemini (compatible endpoints) |
+| `node-cron` | ^3.0.3 | Cron scheduler (monitor daemon + dashboard loop) |
 | `dotenv` | ^16.4.5 | `.env` file loading |
-| `chalk` | ^5.3.0 | Colored terminal output |
+| `chalk` | ^5.3.0 | Colored terminal output (CLI + monitor) |
 | `zod` | ^3.23.8 | Schema validation (available, not yet wired) |
 | `tsx` | dev | Run TypeScript directly without compile step |
+
+**To add when completing Claude adapter:**
+```bash
+pnpm add @anthropic-ai/sdk
+```
 
 ---
 
@@ -219,7 +320,8 @@ Output format from the monitor:
 
 ```bash
 pnpm query "your question"   # ad-hoc CLI query
-pnpm monitor                 # start background cron monitor
+pnpm monitor                 # background cron monitor (stdout)
+pnpm dashboard               # web dashboard at http://localhost:3000
 pnpm build                   # compile TypeScript → dist/
 pnpm typecheck               # type-check without emitting
 ```
@@ -234,49 +336,57 @@ Copy `.env.example` → `.env` and fill in credentials. `.env` is gitignored.
 |---|---|---|---|
 | `AVOXI_API_KEY` | yes | — | AVOXI admin API key |
 | `AVOXI_ACCOUNT_ID` | yes | — | AVOXI account ID |
-| `LLM_PROVIDER` | no | `kimi` | `kimi` or `hermes` |
+| `LLM_PROVIDER` | no | `kimi` | `kimi` \| `openai` \| `gemini` \| `claude` |
 | `KIMI_API_KEY` | if kimi | — | Moonshot AI API key |
 | `KIMI_MODEL` | no | `moonshot-v1-32k` | Kimi model name |
-| `HERMES_BASE_URL` | no | `http://localhost:11434/v1` | Ollama endpoint |
-| `HERMES_MODEL` | no | `hermes3` | Ollama model name |
+| `OPENAI_API_KEY` | if openai | — | OpenAI API key |
+| `OPENAI_MODEL` | no | `gpt-4o` | OpenAI model name |
+| `GEMINI_API_KEY` | if gemini | — | Google AI Studio API key |
+| `GEMINI_MODEL` | no | `gemini-2.0-flash` | Gemini model name |
+| `CLAUDE_API_KEY` | if claude | — | Anthropic API key |
+| `CLAUDE_MODEL` | no | `claude-sonnet-4-6` | Claude model name |
 | `MONITOR_CRON` | no | `*/5 * * * *` | Cron schedule |
+| `DASHBOARD_PORT` | no | `3000` | Dashboard web server port |
 | `FAILURE_RATE_CRITICAL` | no | `40` | Critical threshold (%) |
 | `FAILURE_RATE_WARNING` | no | `15` | Warning threshold (%) |
 | `SHORT_CALL_WARNING` | no | `20` | Short-call threshold (%) |
 | `MIN_CALLS_FOR_DETECTION` | no | `5` | Min calls before alerting |
-| `SLACK_WEBHOOK_URL` | no | — | Slack alert webhook |
-| `ALERT_EMAIL` | no | — | Email alert recipient |
+| `SLACK_WEBHOOK_URL` | no | — | Slack alert webhook *(not yet wired)* |
+| `ALERT_EMAIL` | no | — | Email alert recipient *(not yet wired)* |
 
 ---
 
-## What's Working (Skeleton)
+## What's Complete (Skeleton)
 
 - Full agent loop with tool-calling and multi-turn reasoning
 - All 6 AVOXI API integrations with TypeScript types
-- Both entry points (CLI + monitor daemon)
+- All three entry points (CLI, monitor, dashboard)
+- 4 LLM providers (Kimi, OpenAI, Gemini fully wired; Claude adapter skeleton)
+- Dashboard web UI (HTML/CSS/JS, no framework, SSE-based live updates)
+- In-memory state store with SSE broadcast
 - System prompt with severity logic and SIP code interpretation
 - Config validation with helpful error messages
-- `.gitignore`, `.env.example`, `README.md`
-
----
 
 ## What's Not Yet Implemented
 
-- Slack webhook alerting (env vars defined, send logic not wired)
-- Email alerting via SMTP (env vars defined, send logic not wired)
-- Pagination beyond 1,000 CDRs in `getCdrSummary`
-- Test suite (unit + integration)
-- Docker / deployment configuration
-- Multi-tenant / multi-account support
-- Web dashboard or API surface
+| Item | Where | Notes |
+|---|---|---|
+| Claude adapter | `src/llm-claude.ts` | `@anthropic-ai/sdk` install + 3 conversion methods |
+| Slack webhook | `src/monitor.ts` + `src/dashboard/server.ts` | env var defined, POST not wired |
+| Email via SMTP | same | env vars defined, send logic not wired |
+| CDR pagination > 1,000 | `src/tools/avoxi.ts:getCdrSummary` | cursor-based pagination needed |
+| Test suite | — | unit + integration tests |
+| Docker / deployment | — | Dockerfile + docker-compose |
+| Express (optional) | `src/dashboard/server.ts` | using vanilla `http` now; swap to express for middleware |
 
 ---
 
 ## Git Repository
 
-Initialized at `avoxi-ai-agent/` with the full skeleton in the initial commit. The `.env` file is gitignored — credentials are never committed.
-
 ```bash
 git log --oneline
+# 8504558 Add PROJECT_REPORT.md for GrupoWellness dev team
 # 3762227 Initial commit: avoxi-ai-agent skeleton
 ```
+
+`.env` is gitignored — credentials are never committed. Copy `.env.example` → `.env` to run locally.

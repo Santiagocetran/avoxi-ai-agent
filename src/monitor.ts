@@ -16,7 +16,7 @@ import { runAgent } from './agent.js';
 import { buildMonitorPrompt } from './prompts/system.js';
 
 const avoxiConfig = loadAvoxiConfig();
-const { client, model } = buildLlmClient(loadLlmConfig());
+const { client, model } = await buildLlmClient(loadLlmConfig());
 const schedule = loadMonitorCron();
 
 async function runCheck(): Promise<void> {

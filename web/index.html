@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AVOXI Monitor — GrupoWellness</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0f1117;
+      --surface:     #1a1d27;
+      --border:      #2a2d3a;
+      --text:        #e2e8f0;
+      --muted:       #64748b;
+      --critical:    #ef4444;
+      --warning:     #f59e0b;
+      --info:        #22c55e;
+      --unknown:     #64748b;
+      --tool-call:   #38bdf8;
+      --tool-result: #a3e635;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      padding: 24px;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    header h1 { font-size: 20px; font-weight: 600; }
+    header p  { color: var(--muted); font-size: 13px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+      max-width: 1400px;
+    }
+
+    /* ── Cards ────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+
+    .card h2 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    /* ── Status card ──────────────────────────────────────────────────── */
+    #status-card { grid-row: span 2; }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 26px;
+      font-weight: 700;
+      padding: 12px 20px;
+      border-radius: 8px;
+      background: rgba(100,116,139,0.15);
+      border: 2px solid var(--unknown);
+      color: var(--unknown);
+      margin-bottom: 16px;
+      transition: all 0.4s ease;
+    }
+
+    .status-badge.CRITICAL { border-color: var(--critical); color: var(--critical); background: rgba(239,68,68,0.1); }
+    .status-badge.WARNING  { border-color: var(--warning);  color: var(--warning);  background: rgba(245,158,11,0.1); }
+    .status-badge.INFO     { border-color: var(--info);     color: var(--info);     background: rgba(34,197,94,0.1); }
+    .status-badge.ERROR    { border-color: var(--critical); color: var(--critical); background: rgba(239,68,68,0.1); }
+
+    .dot {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: none;
+    }
+
+    .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.7); }
+    }
+
+    .last-check {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
+    .summary-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 13px;
+      white-space: pre-wrap;
+      max-height: 380px;
+      overflow-y: auto;
+      line-height: 1.6;
+    }
+
+    /* ── Activity feed ────────────────────────────────────────────────── */
+    #activity-feed {
+      height: 260px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .event-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-family: 'Fira Code', 'Consolas', monospace;
+      font-size: 12px;
+      background: var(--bg);
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } }
+
+    .event-row .time   { color: var(--muted); min-width: 80px; }
+    .event-row .label  { min-width: 90px; font-weight: 600; }
+    .event-row .body   { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .label.tool_call   { color: var(--tool-call); }
+    .label.tool_result { color: var(--tool-result); }
+    .label.check_start { color: var(--muted); }
+    .label.check_end   { color: var(--info); }
+
+    /* ── History table ────────────────────────────────────────────────── */
+    #history-card { }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th {
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    tbody tr:hover { background: rgba(255,255,255,0.03); }
+
+    .sev {
+      font-weight: 700;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .sev.CRITICAL { background: rgba(239,68,68,0.2);   color: var(--critical); }
+    .sev.WARNING  { background: rgba(245,158,11,0.2);  color: var(--warning); }
+    .sev.INFO     { background: rgba(34,197,94,0.2);   color: var(--info); }
+    .sev.ERROR    { background: rgba(239,68,68,0.2);   color: var(--critical); }
+    .sev.UNKNOWN  { background: rgba(100,116,139,0.2); color: var(--unknown); }
+
+    .row-summary {
+      color: var(--muted);
+      max-width: 600px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* ── Connection indicator ─────────────────────────────────────────── */
+    #conn-indicator {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #conn-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--unknown);
+    }
+
+    #conn-dot.connected    { background: var(--info); }
+    #conn-dot.disconnected { background: var(--critical); }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar       { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>AVOXI Monitor</h1>
+    <p>GrupoWellnessLatina · AI-powered VoIP health dashboard</p>
+  </div>
+  <div id="conn-indicator">
+    <div id="conn-dot"></div>
+    <span id="conn-label">Connecting…</span>
+  </div>
+</header>
+
+<div class="grid">
+
+  <!-- ── Status card ──────────────────────────────────────── -->
+  <div class="card" id="status-card">
+    <h2>Current Status</h2>
+    <div class="status-badge UNKNOWN" id="status-badge">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">UNKNOWN</span>
+    </div>
+    <p class="last-check" id="last-check">Last check: —</p>
+    <div class="summary-box" id="summary-box">Waiting for first health check…</div>
+  </div>
+
+  <!-- ── Live activity feed ───────────────────────────────── -->
+  <div class="card">
+    <h2>Agent Activity — Live</h2>
+    <div id="activity-feed"></div>
+  </div>
+
+  <!-- ── Check history ────────────────────────────────────── -->
+  <div class="card" id="history-card">
+    <h2>Check History</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Severity</th>
+          <th>Summary</th>
+        </tr>
+      </thead>
+      <tbody id="history-body">
+        <tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px">No checks yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+  // ── SSE connection ─────────────────────────────────────────────────────────
+  const connDot   = document.getElementById('conn-dot');
+  const connLabel = document.getElementById('conn-label');
+
+  function connect() {
+    const es = new EventSource('/events');
+
+    es.onopen = () => {
+      connDot.className = 'connected';
+      connLabel.textContent = 'Live';
+    };
+
+    es.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'snapshot')      applySnapshot(msg.data);
+      else if (msg.type === 'check_result') applyCheckResult(msg.data);
+      else if (msg.type === 'activity')     prependActivity(msg.data);
+    };
+
+    es.onerror = () => {
+      connDot.className = 'disconnected';
+      connLabel.textContent = 'Reconnecting…';
+      es.close();
+      setTimeout(connect, 3000);
+    };
+  }
+
+  connect();
+
+  // ── State application ──────────────────────────────────────────────────────
+  function applySnapshot(state) {
+    updateStatus(state.currentSeverity, state.lastCheckAt);
+    if (state.history.length) {
+      updateSummary(state.history[0].summary);
+      renderHistory(state.history);
+    }
+    // Render activity in reverse (oldest first in DOM)
+    const feed = document.getElementById('activity-feed');
+    feed.innerHTML = '';
+    [...state.activity].reverse().forEach(ev => appendActivity(ev));
+  }
+
+  function applyCheckResult(result) {
+    updateStatus(result.severity, result.timestamp);
+    updateSummary(result.summary);
+    prependHistoryRow(result);
+  }
+
+  function prependActivity(event) {
+    appendActivity(event, true);
+  }
+
+  // ── DOM helpers ────────────────────────────────────────────────────────────
+  function updateStatus(severity, ts) {
+    const badge = document.getElementById('status-badge');
+    const dot   = document.getElementById('status-dot');
+    const text  = document.getElementById('status-text');
+    const check = document.getElementById('last-check');
+
+    badge.className = `status-badge ${severity}`;
+    text.textContent = severity;
+    dot.className = `dot ${severity === 'CRITICAL' || severity === 'WARNING' ? 'pulse' : ''}`;
+    check.textContent = ts ? `Last check: ${new Date(ts).toLocaleString()}` : 'Last check: —';
+  }
+
+  function updateSummary(text) {
+    document.getElementById('summary-box').textContent = text;
+  }
+
+  function renderHistory(history) {
+    const tbody = document.getElementById('history-body');
+    tbody.innerHTML = '';
+    history.forEach(r => prependHistoryRow(r, false));
+  }
+
+  function prependHistoryRow(result, prepend = true) {
+    const tbody = document.getElementById('history-body');
+    // Clear "no checks yet" placeholder
+    if (tbody.children.length === 1 && tbody.children[0].querySelector('[colspan]')) {
+      tbody.innerHTML = '';
+    }
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="white-space:nowrap;color:var(--muted)">${new Date(result.timestamp).toLocaleString()}</td>
+      <td><span class="sev ${result.severity}">${result.severity}</span></td>
+      <td class="row-summary">${escHtml(result.summary.split('\n')[0])}</td>
+    `;
+    if (prepend && tbody.firstChild) tbody.insertBefore(tr, tbody.firstChild);
+    else tbody.appendChild(tr);
+  }
+
+  function appendActivity(event, prepend = false) {
+    const feed  = document.getElementById('activity-feed');
+    const label = {
+      tool_call:   '→ tool call',
+      tool_result: '← result',
+      check_start: '▶ check start',
+      check_end:   '✓ check done',
+    }[event.type] ?? event.type;
+
+    const body = event.toolName
+      ? `${event.toolName}${event.payload ? '  ' + JSON.stringify(event.payload).slice(0, 80) : ''}`
+      : '';
+
+    const row = document.createElement('div');
+    row.className = 'event-row';
+    row.innerHTML = `
+      <span class="time">${new Date(event.timestamp).toLocaleTimeString()}</span>
+      <span class="label ${event.type}">${label}</span>
+      <span class="body">${escHtml(body)}</span>
+    `;
+
+    if (prepend) {
+      feed.insertBefore(row, feed.firstChild);
+      // Keep capped at 30
+      while (feed.children.length > 30) feed.removeChild(feed.lastChild);
+    } else {
+      feed.appendChild(row);
+    }
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+</script>
+</body>
+</html>
