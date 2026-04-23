@@ -52,67 +52,59 @@ avoxi-ai-agent/
 ## Full Architecture
 
 ```
-User / Cron trigger
-        │
-        ▼
- cli.ts  ──────────────────────────────────────────────────────┐
- monitor.ts  ──────────────────────────────────────────────┐   │
- dashboard/server.ts  ──────────────────────────────────┐  │   │
-                                                        │  │   │
-        ▼ (all three share the same core)               │  │   │
-   config.ts                  ← load & validate env vars│  │   │
-        │                                               │  │   │
-        ▼                                               │  │   │
-   llm.ts (buildLlmClient)    ← async factory           │  │   │
-   ├─ kimi    → OpenAI SDK + Moonshot endpoint           │  │   │
-   ├─ openai  → OpenAI SDK native                       │  │   │
-   ├─ gemini  → OpenAI SDK + Google compatible endpoint  │  │   │
-   └─ claude  → llm-claude.ts (ClaudeAdapter) [SKELETON]│  │   │
-        │                                               │  │   │
-        ▼                                               │  │   │
-   agent.ts (runAgent)        ← multi-turn loop         │  │   │
-   ┌─────────────────────────────────────────────────┐  │  │   │
-   │  1. Build messages: [system prompt, user query] │  │  │   │
-   │  2. Call LLM with tool schemas                  │  │  │   │
-   │  3. If LLM calls a tool → dispatch it           │  │  │   │
-   │  4. Fire onToolCall / onToolResult callbacks ───┼──┘  │   │
-   │     (stdout in monitor · SSE events in dashboard)     │   │
-   │  5. Append tool result → go to step 2           │     │   │
-   │  6. If LLM says "stop" → return final answer    │     │   │
-   │  (max 8 rounds)                                 │     │   │
-   └──────────────────────────────────────────────┬──┘     │   │
-                                                  │        │   │
-        ▼                                         │        │   │
-   tools/index.ts             ← dispatcher        │        │   │
-        │                                         │        │   │
-        ├── get_system_health   → avoxi.ts         │        │   │
-        ├── get_cdr_summary     → avoxi.ts         │        │   │
-        ├── get_cdrs            → avoxi.ts         │        │   │
-        ├── get_active_calls    → avoxi.ts         │        │   │
-        ├── get_trunks          → avoxi.ts         │        │   │
-        └── get_dids            → avoxi.ts         │        │   │
-                │                                 │        │   │
-                ▼                                 │        │   │
-        AVOXI REST API v2                         │        │   │
-        Auth: X-API-Key header                    │        │   │
-                                                  │        │   │
-                          ┌───────────────────────┘        │   │
-                          ▼                                │   │
-                  dashboard/store.ts  ← in-memory state    │   │
-                  ├─ currentSeverity                       │   │
-                  ├─ history (last 50 checks)              │   │
-                  ├─ activity (last 30 tool events)        │   │
-                  └─ SSE broadcast to connected browsers   │   │
-                          │                                │   │
-                          ▼                                │   │
-                  dashboard/server.ts                      │   │
-                  ├─ GET /           → web/index.html      │   │
-                  ├─ GET /api/status → JSON                │   │
-                  ├─ GET /api/history → JSON               │   │
-                  └─ GET /events     → SSE stream ─────────┘   │
-                          │                                    │
-                          ▼                                    │
-                  web/index.html ← live UI in browser ─────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Entry points  (pick one)                                       │
+│                                                                 │
+│   pnpm query      →  cli.ts             one-shot, stdout        │
+│   pnpm monitor    →  monitor.ts         cron loop, stdout       │
+│   pnpm dashboard  →  dashboard/server   cron loop + web UI      │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+              config.ts  ──  loads .env, validates required vars
+                           │
+                           ▼
+              llm.ts  ──  builds the LLM client
+              │
+              ├─ kimi   / openai / gemini  →  openai SDK
+              └─ claude                   →  ClaudeAdapter [SKELETON]
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  agent.ts  —  multi-turn loop (max 8 rounds)                    │
+│                                                                 │
+│  1. send [system prompt + user query] to LLM                    │
+│  2. LLM returns tool call  →  dispatch to tools/index.ts        │
+│  3. append result, repeat until LLM returns plain text          │
+│                                                                 │
+│  callbacks: onToolCall / onToolResult                           │
+│    · monitor    →  print to stdout                              │
+│    · dashboard  →  push event to store → broadcast via SSE      │
+└──────────┬──────────────────────────────────────────────────────┘
+           │
+           ▼
+     tools/index.ts  ──  dispatches to avoxi.ts
+     │
+     ├─ get_system_health    ├─ get_active_calls
+     ├─ get_cdr_summary      ├─ get_trunks
+     ├─ get_cdrs             └─ get_dids
+     │
+     └──▶  AVOXI REST API v2  (auth: X-API-Key)
+```
+
+**Dashboard data flow (when using `pnpm dashboard`)**
+
+```
+agent callbacks
+      │  push events
+      ▼
+dashboard/store.ts  ──  holds current severity, last 50 checks, last 30 tool events
+      │  SSE broadcast
+      ▼
+dashboard/server.ts  ──  GET /events (SSE)  ·  GET /api/status  ·  GET /api/history
+      │
+      ▼
+web/index.html  ──  live status badge · agent activity feed · check history table
 ```
 
 ---
