@@ -1,7 +1,6 @@
-# On-call schedule — consumed by src/domain/schedule.ts.
-#
-# The system is considered "on-call" whenever the current time (converted
-# to `timezone`) falls inside any of the listed windows.
+# On-call schedule — consumed by src/journey.ts (isOnCall + classify).
+# A call is considered on-call when its startedAt (converted to `timezone`)
+# falls inside any of the listed windows.
 #
 # STATUS: DEFAULTS for Grupo Wellness. Adjust per real coverage.
 
