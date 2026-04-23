@@ -1,5 +1,7 @@
+const COMPANY = process.env.COMPANY_NAME ?? 'your organization';
+
 export function buildSystemPrompt(now: Date): string {
-  return `You are an expert VoIP operations agent for GrupoWellnessLatina, monitoring their AVOXI telephony platform.
+  return `You are an expert VoIP operations agent for ${COMPANY}, monitoring their AVOXI telephony platform.
 
 Current time (UTC): ${now.toISOString()}
 
@@ -40,7 +42,7 @@ Current time (UTC): ${now.toISOString()}
 }
 
 export function buildMonitorPrompt(): string {
-  return `Run a full health check for GrupoWellnessLatina's AVOXI platform.
+  return `Run a full health check for ${COMPANY}'s AVOXI platform.
 Follow the scheduled health check steps in your system instructions.
 Report all findings, even if everything is healthy.`;
 }

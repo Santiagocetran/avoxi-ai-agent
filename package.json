@@ -1,7 +1,7 @@
 {
   "name": "avoxi-ai-agent",
   "version": "0.1.0",
-  "description": "AI agent for AVOXI monitoring — GrupoWellnessLatina",
+  "description": "AI agent for AVOXI telephony monitoring — multi-LLM, function-calling, web dashboard",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/cli.ts",

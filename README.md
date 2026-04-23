@@ -1,86 +1,158 @@
 # avoxi-ai-agent
 
-AI agent for monitoring the GrupoWellnessLatina AVOXI telephony platform.
-Uses function-calling to query the live AVOXI API and reason over call data in natural language.
-
-**LLM options:** Kimi (Moonshot AI cloud API) or Hermes 3 (local via Ollama) — no Anthropic or Vercel dependency.
+AI-powered VoIP operations monitoring agent for the AVOXI telephony platform.
+Connects to the AVOXI API via LLM function-calling to diagnose call quality issues, detect anomalies, and report health status in plain language.
 
 ---
 
-## What it does
+## Operating modes
 
-| Mode | Description |
-|---|---|
-| `pnpm monitor` | Background process. Checks the platform every 5 min, prints severity-labelled reports |
-| `pnpm query "..."` | One-shot CLI. Ask any question in plain language, get a structured answer |
-
-### What it monitors
-- **CDR analysis** — failure rate, short-call rate, avg duration, SIP code breakdown
-- **Active calls** — real-time concurrent call count and trunk usage
-- **Trunk health** — status per trunk, capacity saturation
-- **DID status** — suspended, porting, or misconfigured phone numbers
-- **API health** — AVOXI endpoint availability and latency
-
-### Anomaly thresholds (configurable in `.env`)
-| Condition | Level |
-|---|---|
-| Failure rate ≥ 40% | CRITICAL |
-| Failure rate 15–40% | WARNING |
-| Short-call rate ≥ 20% | WARNING |
-| Trunk capacity > 80% | WARNING |
-| AVOXI API down / timeout | CRITICAL |
+| Mode | Command | Description |
+|---|---|---|
+| **CLI** | `pnpm query "…"` | Ad-hoc question — answered once, then exit |
+| **Monitor** | `pnpm monitor` | Background cron daemon, prints to stdout |
+| **Dashboard** | `pnpm dashboard` | Web UI + cron daemon at `http://localhost:3000` |
 
 ---
 
-## Prerequisites
+## Directory tree
 
-### 1. Node.js ≥ 20 and pnpm
-
-```bash
-node --version   # must be >= 20
-npm i -g pnpm
+```
+avoxi-ai-agent/
+├── .env.example               ← all configurable variables with defaults
+├── .gitignore
+├── package.json
+├── tsconfig.json
+├── web/
+│   └── index.html             ← single-page dashboard UI (vanilla JS, no framework)
+└── src/
+    ├── agent.ts               ← core multi-turn LLM loop (max 8 rounds)
+    ├── cli.ts                 ← entry point: pnpm query
+    ├── monitor.ts             ← entry point: pnpm monitor (cron → stdout)
+    ├── config.ts              ← env var loader & validator
+    ├── llm.ts                 ← LLM client factory
+    ├── llm-claude.ts          ← Anthropic SDK adapter (skeleton)
+    ├── prompts/
+    │   └── system.ts          ← system prompt + health-check instructions
+    ├── tools/
+    │   ├── avoxi.ts           ← AVOXI API client + TypeScript data models
+    │   └── index.ts           ← tool schemas (JSON Schema) + dispatcher
+    └── dashboard/
+        ├── server.ts          ← HTTP server + SSE endpoint + cron loop
+        └── store.ts           ← in-memory state: status, history, activity feed
 ```
 
-### 2. LLM provider (pick one)
+---
 
-**Option A — Kimi (recommended for production)**
+## Architecture
 
-Get an API key from [platform.moonshot.cn](https://platform.moonshot.cn).
-Set `LLM_PROVIDER=kimi` and `KIMI_API_KEY=sk-...` in your `.env`.
-
-**Option B — Hermes 3 local via Ollama (no API cost, fully offline)**
-
-```bash
-# Install Ollama: https://ollama.com/download
-ollama serve                  # start the local server
-ollama pull hermes3           # download the model (~4 GB)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Entry points  (pick one)                                       │
+│                                                                 │
+│   pnpm query      →  cli.ts             one-shot, stdout        │
+│   pnpm monitor    →  monitor.ts         cron loop, stdout       │
+│   pnpm dashboard  →  dashboard/server   cron loop + web UI      │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+              config.ts  ──  loads .env, validates required vars
+                           │
+                           ▼
+              llm.ts  ──  builds the LLM client
+              │
+              ├─ kimi / openai / gemini  →  openai SDK
+              └─ claude                 →  ClaudeAdapter [SKELETON]
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  agent.ts  —  multi-turn loop (max 8 rounds)                    │
+│                                                                 │
+│  1. send [system prompt + user query] to LLM                    │
+│  2. LLM returns tool call  →  dispatch to tools/index.ts        │
+│  3. append result, repeat until LLM returns plain text          │
+│                                                                 │
+│  callbacks: onToolCall / onToolResult                           │
+│    · monitor    →  print to stdout                              │
+│    · dashboard  →  push to store → broadcast via SSE            │
+└──────────┬──────────────────────────────────────────────────────┘
+           │
+           ▼
+     tools/index.ts  ──  dispatches to avoxi.ts
+     │
+     ├─ get_system_health    ├─ get_active_calls
+     ├─ get_cdr_summary      ├─ get_trunks
+     ├─ get_cdrs             └─ get_dids
+     │
+     └──▶  AVOXI REST API v2  (auth: X-API-Key)
 ```
 
-Set `LLM_PROVIDER=hermes` in your `.env`. No API key needed.
+**Dashboard data flow**
 
-### 3. AVOXI API credentials
+```
+agent callbacks
+      │  push events
+      ▼
+dashboard/store.ts  ──  current severity · last 50 checks · last 30 tool events
+      │  SSE broadcast
+      ▼
+dashboard/server.ts  ──  GET /events (SSE) · GET /api/status · GET /api/history
+      │
+      ▼
+web/index.html  ──  status badge · live activity feed · check history table
+```
 
-1. Log in to your AVOXI admin dashboard.
-2. Go to **Settings → API Access** (or **Integrations → API**).
-3. Generate or copy your **API Key**.
-4. Find your **Account ID** in Settings → Account.
+---
+
+## LLM providers
+
+| Provider | `LLM_PROVIDER` value | Default model | SDK |
+|---|---|---|---|
+| Kimi (Moonshot AI) | `kimi` | `moonshot-v1-32k` | `openai` |
+| OpenAI | `openai` | `gpt-4o` | `openai` |
+| Google Gemini | `gemini` | `gemini-2.0-flash` | `openai` (compatible endpoint) |
+| Anthropic Claude | `claude` | `claude-sonnet-4-6` | `@anthropic-ai/sdk` *(adapter — skeleton)* |
+
+Kimi, OpenAI, and Gemini all speak the OpenAI-compatible wire format and share the same SDK. Claude uses the Anthropic SDK; `src/llm-claude.ts` adapts it to the same interface so `agent.ts` needs no changes.
+
+To complete the Claude adapter: `pnpm add @anthropic-ai/sdk`, then implement the three conversion methods inside `src/llm-claude.ts`.
+
+---
+
+## Dashboard
+
+`pnpm dashboard` starts a web server at `http://localhost:3000` that runs the same monitor loop and exposes a live UI — no Slack, no email, no external services needed.
+
+| Section | What it shows |
+|---|---|
+| Status badge | Current severity (CRITICAL / WARNING / INFO) — color-coded, pulses on active alerts |
+| Last check summary | Full LLM response from the most recent health check |
+| Live activity feed | Real-time stream of every tool call the agent makes |
+| Check history | Last 50 checks with timestamp, severity, and summary |
+
+REST endpoints: `GET /` (UI) · `GET /api/status` · `GET /api/history` · `GET /events` (SSE stream)
 
 ---
 
 ## Setup
 
+### Prerequisites
+
+- Node.js ≥ 20 and pnpm
+- An AVOXI admin API key + account ID
+- An API key for your chosen LLM provider
+
+### Install
+
 ```bash
-# 1. Clone / enter the folder
-cd avoxi-ai-agent
-
-# 2. Install dependencies
 pnpm install
-
-# 3. Create your .env
 cp .env.example .env
-# Edit .env — fill in AVOXI_API_KEY, AVOXI_ACCOUNT_ID, and your LLM provider creds
+# edit .env — fill in AVOXI_API_KEY, AVOXI_ACCOUNT_ID, and your LLM credentials
+```
 
-# 4. Verify the connection
+### Verify
+
+```bash
 pnpm query "Is the AVOXI system healthy right now?"
 ```
 
@@ -88,181 +160,121 @@ pnpm query "Is the AVOXI system healthy right now?"
 
 ## Usage
 
-### Ad-hoc queries (CLI)
+### Ad-hoc queries
 
 ```bash
-# Current system health
-pnpm query "Is the system healthy right now?"
-
-# Last hour summary
 pnpm query "What was the failure rate in the last hour?"
-
-# Specific time window
 pnpm query "Show me all failed calls between 2pm and 4pm today"
-
-# DID investigation
 pnpm query "Are there any suspended or porting DIDs?"
-
-# Trunk status
 pnpm query "Which trunks are close to capacity?"
-
-# Deep error analysis
 pnpm query "What SIP error codes are we seeing most in the last 2 hours?"
-
-# Incident reconstruction
 pnpm query "Walk me through everything that happened between 10am and 11am today"
 ```
 
-### Background monitor
+### Background monitor (stdout)
 
 ```bash
 pnpm monitor
+# pipe to a log file:
+pnpm monitor >> /var/log/avoxi-agent.log 2>&1
 ```
 
-Starts immediately with one health check, then runs every 5 minutes (configurable via `MONITOR_CRON`).
-Output is plain text — pipe it wherever you need:
+### Web dashboard
 
 ```bash
-# Save to log file
-pnpm monitor >> /var/log/avoxi-agent.log 2>&1
-
-# Post to Slack (example using curl in a wrapper script)
-pnpm monitor | while IFS= read -r line; do
-  curl -s -X POST "$SLACK_WEBHOOK_URL" \
-    -H 'Content-type: application/json' \
-    -d "{\"text\": \"$(echo "$line" | sed 's/"/\\"/g')\"}"
-done
+pnpm dashboard
+# open http://localhost:3000
 ```
 
 ---
 
-## Project structure
+## Available tools (function calls)
 
-```
-avoxi-ai-agent/
-├── src/
-│   ├── agent.ts          # Core LLM loop — multi-turn tool calling until final answer
-│   ├── cli.ts            # pnpm query entrypoint
-│   ├── monitor.ts        # pnpm monitor entrypoint (cron)
-│   ├── config.ts         # Loads and validates all env vars
-│   ├── llm.ts            # LLM client factory (Kimi / Hermes / any OpenAI-compatible)
-│   ├── tools/
-│   │   ├── avoxi.ts      # AVOXI API fetch functions (getCdrs, getTrunks, etc.)
-│   │   └── index.ts      # OpenAI tool schemas + dispatcher
-│   └── prompts/
-│       └── system.ts     # System prompt + scheduled check prompt
-├── .env.example          # All configurable options with descriptions
-├── package.json
-└── tsconfig.json
-```
+| Tool | What it does |
+|---|---|
+| `get_system_health` | Probes AVOXI API availability and measures latency |
+| `get_cdr_summary` | Aggregates up to 1,000 CDRs: failure rate, short-call rate, avg duration, SIP breakdown |
+| `get_cdrs` | Raw CDR records with filters (date range, disposition, DID, direction) |
+| `get_active_calls` | Real-time active call list |
+| `get_trunks` | SIP trunk status and concurrent call counts |
+| `get_dids` | DID phone numbers with status and assignment |
 
 ---
 
-## Configuration reference
+## Alert thresholds (configurable in `.env`)
 
-All config lives in `.env`. Copy `.env.example` as your starting point.
+| Condition | Severity |
+|---|---|
+| Failure rate ≥ 40% · trunk down · API unreachable | **CRITICAL** |
+| Failure rate 15–40% · short-call rate ≥ 20% · trunk >80% capacity · latency >2s | **WARNING** |
+| Everything within normal range | **INFO** |
+
+---
+
+## Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `LLM_PROVIDER` | yes | `kimi` | `kimi` or `hermes` |
-| `KIMI_API_KEY` | if kimi | — | Moonshot AI API key |
-| `KIMI_MODEL` | no | `moonshot-v1-32k` | Kimi model name |
-| `KIMI_BASE_URL` | no | `https://api.moonshot.cn/v1` | Override for proxy |
-| `HERMES_BASE_URL` | no | `http://localhost:11434/v1` | Ollama base URL |
-| `HERMES_MODEL` | no | `hermes3` | Ollama model tag |
 | `AVOXI_API_KEY` | yes | — | AVOXI admin API key |
 | `AVOXI_ACCOUNT_ID` | yes | — | AVOXI account ID |
-| `AVOXI_BASE_URL` | no | `https://api.avoxi.com/v2` | Override for staging |
+| `LLM_PROVIDER` | no | `kimi` | `kimi` \| `openai` \| `gemini` \| `claude` |
+| `KIMI_API_KEY` | if kimi | — | Moonshot AI key |
+| `KIMI_MODEL` | no | `moonshot-v1-32k` | |
+| `OPENAI_API_KEY` | if openai | — | OpenAI key |
+| `OPENAI_MODEL` | no | `gpt-4o` | |
+| `GEMINI_API_KEY` | if gemini | — | Google AI Studio key |
+| `GEMINI_MODEL` | no | `gemini-2.0-flash` | |
+| `CLAUDE_API_KEY` | if claude | — | Anthropic key |
+| `CLAUDE_MODEL` | no | `claude-sonnet-4-6` | |
+| `COMPANY_NAME` | no | `your organization` | Used in the LLM system prompt |
 | `MONITOR_CRON` | no | `*/5 * * * *` | Cron schedule |
-| `FAILURE_RATE_CRITICAL` | no | `40` | % threshold for CRITICAL |
-| `FAILURE_RATE_WARNING` | no | `15` | % threshold for WARNING |
-| `SHORT_CALL_WARNING` | no | `20` | Short-call % threshold |
-| `SLACK_WEBHOOK_URL` | no | — | Slack incoming webhook |
+| `DASHBOARD_PORT` | no | `3000` | Web dashboard port |
+| `FAILURE_RATE_CRITICAL` | no | `40` | Critical threshold (%) |
+| `FAILURE_RATE_WARNING` | no | `15` | Warning threshold (%) |
+| `SHORT_CALL_WARNING` | no | `20` | Short-call threshold (%) |
+| `MIN_CALLS_FOR_DETECTION` | no | `5` | Min calls before alerting |
 
 ---
 
-## How it works internally
+## What's complete (skeleton)
 
-```
-User prompt / cron tick
-        │
-        ▼
-  System prompt (role + thresholds + SIP code guide)
-        │
-        ▼
-  LLM (Kimi or Hermes) ─── decides which tools to call
-        │
-        ▼ (tool_calls)
-  Tool dispatcher
-    ├─ get_system_health  → AVOXI /numbers (latency probe)
-    ├─ get_cdr_summary    → AVOXI /cdr     (aggregated stats)
-    ├─ get_cdrs           → AVOXI /cdr     (raw records)
-    ├─ get_active_calls   → AVOXI /calls/active
-    ├─ get_trunks         → AVOXI /trunks
-    └─ get_dids           → AVOXI /numbers
-        │
-        ▼ (tool results injected back as messages)
-  LLM reasons over results → may call more tools (up to 8 rounds)
-        │
-        ▼
-  Final text response with severity label and recommended action
-```
+- Full agent loop with multi-turn tool-calling
+- All 6 AVOXI API integrations with TypeScript types
+- All three entry points (CLI, monitor, dashboard)
+- Kimi, OpenAI, Gemini fully wired; Claude adapter skeleton ready to implement
+- Dashboard web UI — SSE-based live updates, no framework
+- In-memory state store with SSE broadcast to all connected tabs
+- System prompt with severity logic and SIP code guide
+- Config validation with clear error messages on missing vars
 
-The agent loop in `src/agent.ts` runs up to `MAX_TOOL_ROUNDS = 8` iterations.
-On each round the LLM either requests tool calls or produces a final answer (`finish_reason: stop`).
+## What's not yet implemented
 
----
-
-## Adding a new tool
-
-1. Add the fetch function to `src/tools/avoxi.ts`.
-2. Add the OpenAI function schema to the `TOOLS` array in `src/tools/index.ts`.
-3. Add the dispatch case to the `dispatchTool` switch in `src/tools/index.ts`.
-4. Update the system prompt in `src/prompts/system.ts` if the LLM needs guidance on when to use it.
-
----
-
-## Switching LLM provider at runtime
-
-```bash
-# Use Kimi
-LLM_PROVIDER=kimi pnpm query "health check"
-
-# Use local Hermes
-LLM_PROVIDER=hermes pnpm query "health check"
-```
-
----
-
-## AVOXI API notes
-
-- Base URL: `https://api.avoxi.com/v2`
-- Authentication: `X-API-Key` header (set in `AVOXI_API_KEY`)
-- CDR endpoint: `GET /cdr` — supports `start_date`, `end_date`, `disposition`, `did_number`, `direction`, `limit`, `offset`
-- The agent fetches up to 1000 CDRs per window for `get_cdr_summary` and aggregates locally (AVOXI v2 has no native aggregation endpoint).
-- If your account uses a different base path or authentication scheme, override `AVOXI_BASE_URL` and update `src/tools/avoxi.ts:buildHeaders()`.
+| Item | Where | Notes |
+|---|---|---|
+| Claude adapter | `src/llm-claude.ts` | Install `@anthropic-ai/sdk`, implement 3 conversion methods |
+| Slack webhook | `src/monitor.ts` / `src/dashboard/server.ts` | Env var defined, POST not wired |
+| Email via SMTP | same | Env vars defined, send logic not wired |
+| CDR pagination > 1,000 | `src/tools/avoxi.ts` | Cursor-based pagination needed |
+| Test suite | — | Unit + integration tests |
+| Docker / deployment | — | Dockerfile + docker-compose |
 
 ---
 
 ## Troubleshooting
 
-**`AVOXI API error 401`**
-→ `AVOXI_API_KEY` is wrong or expired. Regenerate it in the AVOXI dashboard.
+**`AVOXI API error 401`** — `AVOXI_API_KEY` is wrong or expired. Regenerate in AVOXI dashboard.
 
-**`AVOXI API error 403`**
-→ The API key does not have CDR read permissions. Check the key's permission scope in Settings → API Access.
+**`AVOXI API error 403`** — API key lacks CDR read permission. Check scope in Settings → API Access.
 
-**`Missing required env var: AVOXI_ACCOUNT_ID`**
-→ Add `AVOXI_ACCOUNT_ID=...` to your `.env` file.
+**`Missing required env var`** — copy `.env.example` to `.env` and fill in the flagged variable.
 
-**Hermes: `connect ECONNREFUSED 127.0.0.1:11434`**
-→ Ollama is not running. Start it with `ollama serve`.
+**`Agent exceeded 8 tool rounds`** — LLM is looping. Check that tools return valid JSON and the system prompt is unambiguous.
 
-**Hermes: model not found**
-→ Run `ollama pull hermes3` to download the model first.
+---
 
-**Kimi: `401 Unauthorized`**
-→ Check `KIMI_API_KEY` in `.env`. Keys start with `sk-`.
+## Adding a new tool
 
-**Agent exceeds 8 tool rounds**
-→ The LLM is looping. Check that the system prompt is clear and that tools are returning valid JSON. Reduce `MAX_TOOL_ROUNDS` in `src/agent.ts` if needed.
+1. Add the fetch function to `src/tools/avoxi.ts`
+2. Add the JSON Schema definition to the `TOOLS` array in `src/tools/index.ts`
+3. Add the dispatch case to `dispatchTool` in `src/tools/index.ts`
+4. Update the system prompt in `src/prompts/system.ts` if the LLM needs guidance on when to use it
