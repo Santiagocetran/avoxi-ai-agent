@@ -1,0 +1,44 @@
+-- SQLite schema for the audit store.
+-- STATUS: SKELETON — fields listed inline. Actual CREATE TABLE statements
+-- and indices to be filled in during implementation.
+--
+-- audit_runs
+--   id              TEXT PRIMARY KEY        (uuid)
+--   started_at      TEXT NOT NULL           (ISO-8601 UTC)
+--   ended_at        TEXT
+--   trigger         TEXT NOT NULL           ('audit'|'watch'|'inspect'|'report')
+--   window_from     TEXT NOT NULL
+--   window_to       TEXT NOT NULL
+--   result_summary  TEXT                    (LLM final text)
+--
+-- audited_calls
+--   avoxi_call_id   TEXT PRIMARY KEY
+--   run_id          TEXT REFERENCES audit_runs(id)
+--   status          TEXT NOT NULL           ('answered'|'unanswered'|'voicemail')
+--   missed          INTEGER NOT NULL        (0|1)
+--   missed_reason   TEXT
+--   date_start      TEXT NOT NULL
+--   from_number     TEXT
+--   to_number       TEXT
+--   friendly_name   TEXT
+--   journey_json    TEXT NOT NULL
+--   cdr_json        TEXT NOT NULL
+--   transcript      TEXT                    (only if privacy gate allowed)
+--   audited_at      TEXT NOT NULL
+--
+-- notifications
+--   id              TEXT PRIMARY KEY
+--   call_id         TEXT REFERENCES audited_calls(avoxi_call_id)
+--   channel         TEXT NOT NULL           ('slack'|'email'|'webhook'|'whatsapp')
+--   target          TEXT NOT NULL
+--   payload         TEXT NOT NULL
+--   delivered_at    TEXT
+--   error           TEXT
+--
+-- privacy_decisions
+--   id              TEXT PRIMARY KEY
+--   call_id         TEXT
+--   operation       TEXT NOT NULL           ('download'|'transcribe')
+--   allowed         INTEGER NOT NULL
+--   reason          TEXT
+--   decided_at      TEXT NOT NULL

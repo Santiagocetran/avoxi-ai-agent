@@ -1,280 +1,354 @@
 # avoxi-ai-agent
 
-AI-powered VoIP operations monitoring agent for the AVOXI telephony platform.
-Connects to the AVOXI API via LLM function-calling to diagnose call quality issues, detect anomalies, and report health status in plain language.
+**An agent that audits Avoxi's call journey via the v2 API — detects
+unanswered calls during on-call hours and (optionally, policy-gated)
+audits recorded calls.**
+
+This document is both the project README and the final analysis report
+for the paradigm change described in `major-changes.md`. The skeleton in
+this repo is the concrete implementation of that analysis.
 
 ---
 
-## Operating modes
+## 1. Analysis — why this paradigm
 
-| Mode | Command | Description |
+### 1.1 The original brief
+
+The first version of this project (see `git log`, commits up to
+`100618b`) was an **infra-monitoring dashboard** — generic VoIP health
+checks against Avoxi, severity badges (CRITICAL/WARNING/INFO), and a
+web UI that polled a "system health" metric.
+
+### 1.2 What the SW team told us
+
+After review with the GrupoWellness software team (captured in
+`SW-lead-recomendations.md`):
+
+- The failures that actually hurt the business happen on the **mobile
+  app**. There is no web console to scrape.
+- The **concrete operational pain** is a manual flow: the on-call agent
+  sees a missed call, pings a WhatsApp group, the tech team looks up the
+  Call ID in the Avoxi panel, and replies with context.
+- The right unit of analysis is **one call**, not "aggregate health over
+  a 5-minute window". The SW lead explicitly named the **"Call Journey"**
+  — the per-call record of hold, queue, agent routing — as the object
+  we should be operating on.
+- Recording analysis (transcription, content audit) is valuable but
+  **needs a privacy review before implementation**.
+
+### 1.3 The pivot
+
+The previous skeleton's assumptions didn't survive contact with those
+requirements, so we're rebuilding:
+
+> **"An agent that checks Avoxi's call journey via API to detect
+> unanswered calls and audit recorded calls."**
+
+Everything in this repo is shaped around that single sentence.
+
+See `docs/PARADIGM-SHIFT.md` for the full before/after diff.
+
+### 1.4 What the Avoxi v2 API actually offers
+
+We audited the live OpenAPI spec at
+`https://genius.avoxi.com/api/v2/api-docs/` (downloaded as
+`api-docs-standalone.swagger`, OpenAPI 3.0.3, 100 paths). Key findings:
+
+- **There is no `GET /call-journey/{id}` endpoint.** The journey does
+  not exist as a first-class resource.
+- **`GET /cdrs`** is where the journey lives, implicitly. Each CDR
+  carries:
+  - `avoxi_call_id` — the Call ID we need to automate lookup on.
+  - `status` — `ANSWERED | UNANSWERED | VOICEMAIL`.
+  - `forwarded_to[]` — which routing buckets the call entered
+    (`SIP`, `Queue`, `Agent`, …), in order.
+  - `agent_actions[]` — per-agent events (`handled`, etc.) with user
+    ID, name, and timestamp. **These are the journey steps.**
+  - `voicemail_details.prior_extension_called` — who/what was rung last
+    before the call fell through to voicemail.
+  - `forward_destination` — the final hop before termination.
+  - `call_recording_url` — pre-signed URL valid **24 hours** — the
+    bridge to the recording-audit capability.
+- **`GET /agents`** and **`GET /agents/timeline`** (the timeline
+  endpoint is still "Coming Soon" per Avoxi) give us the rotation state
+  we need to say "this call came in while nobody was on duty".
+- **`GET /live/teams`** and **`GET /live/team/{team_id}`** give a
+  real-time view (refreshed every 5 s) for the `watch` daemon.
+- **`GET /alerts/logs`** lets us cross-reference with Avoxi's own
+  incident stream.
+
+So the design locks onto: **poll `/cdrs` continuously, reconstruct the
+journey locally, classify against an on-call calendar, and escalate.**
+
+### 1.5 Scope decisions
+
+| Decision | Rationale |
+|---|---|
+| Journey is reconstructed **client-side** from CDR fields. | The Avoxi v2 API does not expose a single journey endpoint. |
+| Recordings are handled behind a **single privacy gate** (`src/privacy/gate.ts`) with **`enabled: false`** defaults. | SW-lead flagged audio as requiring legal review. We ship off-by-default so the rest of the system is usable today. |
+| **SQLite** persistence (via `better-sqlite3`), not Postgres/Redis. | Single-binary deploy; one file to back up; swappable later. |
+| Keep the **multi-provider LLM** layer from the old skeleton. | It was already working, and call audit is one more task on the same function-calling loop. |
+| **Drop** infra metrics: trunks, DIDs, SIP failure rates, active-call dashboards. | Not the problem we're solving; belongs to Avoxi's own console. |
+
+---
+
+## 2. Proposed architecture
+
+```
+                   ┌───────────────────────────────────────────────┐
+                   │  Entry points (choose one)                    │
+                   │                                               │
+                   │    pnpm audit      one-shot batch audit       │
+                   │    pnpm watch      cron daemon (on-call)      │
+                   │    pnpm inspect    single-call deep audit     │
+                   │    pnpm report     periodic aggregate report  │
+                   │    pnpm dashboard  web UI + SSE live feed     │
+                   └────────────────────────┬──────────────────────┘
+                                            │
+                                            ▼
+                                 config.ts · loads .env + config/*.yaml
+                                            │
+                ┌───────────────────────────┼────────────────────────────┐
+                ▼                           ▼                            ▼
+         llm/index.ts              agent.ts  (multi-turn)        domain/schedule.ts
+     (kimi/openai/gemini/claude)          │                   (on-call window logic)
+                                          │
+                                          ▼
+                          ┌─────────────────────────────────┐
+                          │  tools/  (exposed to the LLM)   │
+                          │                                 │
+                          │  list_calls        (/cdrs)      │
+                          │  get_call_journey  (/cdrs + →)  │
+                          │  get_recording_url              │
+                          │  transcribe_call   (gated)      │
+                          │  list_agents       (/agents)    │
+                          │  get_agent_timeline             │
+                          │  get_live_team                  │
+                          │  list_alert_logs                │
+                          │  is_on_call  · classify_call    │
+                          └────────────────┬────────────────┘
+                                           │
+                                           ▼
+                              avoxi/client.ts  ──►  AVOXI v2 API
+                                           │              │
+                                           ▼              ▼
+                     domain/journey.build()     privacy/gate.ts ──► avoxi/recording.ts
+                     domain/missed-call.classify()                        │
+                                           │                              ▼
+                                           │                 (only if gate.allowed)
+                                           ▼                        transcription
+                                  storage/audit-log (SQLite)               │
+                                           │                               │
+                                 ┌─────────┴─────────┐                     │
+                                 ▼                   ▼                     │
+                          notifier/slack      dashboard/store ◄────────────┘
+                          notifier/email      (SSE broadcast)
+                          notifier/webhook
+                          notifier/whatsapp
+```
+
+### 2.1 Data flow per call
+
+```
+  AVOXI /cdrs
+       │
+       ▼
+  AvoxiCdr ─► domain/journey.build()    ─► JourneyTimeline
+           ─► domain/missed-call.classify(cdr, schedule, agents)
+                                        ─► { missed: bool, reason: MissedReason }
+       │
+       ▼
+  storage/audit-log.upsertAuditedCall()   (dedupe on avoxi_call_id)
+       │
+       ├─ if missed AND new ──► notifier/* ──► (Slack, WhatsApp, …)
+       │
+       └─ always ──► dashboard/store ──► SSE to web UI
+```
+
+### 2.2 Module responsibilities
+
+| Layer | Module | Responsibility |
 |---|---|---|
-| **CLI** | `pnpm query "…"` | Ad-hoc question — answered once, then exit |
-| **Monitor** | `pnpm monitor` | Background cron daemon, prints to stdout |
-| **Dashboard** | `pnpm dashboard` | Web UI + cron daemon at `http://localhost:3000` |
+| HTTP | `src/avoxi/` | Typed client + endpoint constants + OpenAPI-derived models. No business logic. |
+| Pure domain | `src/domain/` | Schedule, missed-call classifier, journey reconstruction, report aggregation. Fully offline-testable. |
+| Privacy | `src/privacy/` | One gate, one policy, one place for legal to audit. |
+| Persistence | `src/storage/` | SQLite: runs, audited calls, notifications, privacy decisions. |
+| LLM | `src/llm/` + `src/agent.ts` | Provider adapters + the multi-turn tool-calling loop (unchanged concept from previous skeleton). |
+| Function-calling tools | `src/tools/` | Thin adapters that expose `avoxi/` + `domain/` to the LLM. |
+| Prompts | `src/prompts/` | Task-specific system/user prompts (watch, inspect, report). |
+| Notifications | `src/notifier/` | Slack / email / webhook / WhatsApp fan-out. |
+| Entry points | `src/cli/`, `src/dashboard/` | Thin composition layers. No business logic. |
+| Reports | `src/report/` | Markdown + HTML renderers for periodic artifacts. |
+
+See `docs/ARCHITECTURE.md` for the durable architecture reference.
 
 ---
 
-## Directory tree
+## 3. File tree
 
 ```
 avoxi-ai-agent/
-├── .env.example               ← all configurable variables with defaults
-├── .gitignore
-├── package.json
+├── README.md                       ← this document
+├── major-changes.md                ← the brief that drove this rebuild
+├── SW-lead-recomendations.md       ← the SW lead's context
+├── package.json                    ← scripts: audit · watch · inspect · report · dashboard
 ├── tsconfig.json
+├── .env.example                    ← every env var documented
+├── .gitignore
+│
+├── config/
+│   ├── schedule.yaml               ← on-call windows (ART default, Grupo Wellness)
+│   ├── privacy.yaml                ← recordings/transcription policy; OFF by default
+│   └── agents.yaml                 ← local agent directory + rotation groups
+│
+├── docs/
+│   ├── ARCHITECTURE.md             ← layered design reference
+│   ├── AVOXI-API.md                ← which endpoints we use, which we don't, why
+│   ├── ON-CALL-SCHEDULE.md         ← schedule semantics + how to change it
+│   ├── PRIVACY.md                  ← recording/transcription governance
+│   └── PARADIGM-SHIFT.md           ← before/after, and what we deleted
+│
 ├── web/
-│   └── index.html             ← single-page dashboard UI (vanilla JS, no framework)
+│   └── index.html                  ← dashboard SPA shell (SSE-driven)
+│
 └── src/
-    ├── agent.ts               ← core multi-turn LLM loop (max 8 rounds)
-    ├── cli.ts                 ← entry point: pnpm query
-    ├── monitor.ts             ← entry point: pnpm monitor (cron → stdout)
-    ├── config.ts              ← env var loader & validator
-    ├── llm.ts                 ← LLM client factory
-    ├── llm-claude.ts          ← Anthropic SDK adapter (skeleton)
+    ├── agent.ts                    ← multi-turn LLM + tool-dispatch loop
+    ├── config.ts                   ← env + YAML loader, one read at startup
+    │
+    ├── cli/
+    │   ├── audit.ts                ← pnpm audit   — batch audit of a window
+    │   ├── watch.ts                ← pnpm watch   — cron daemon during on-call
+    │   ├── inspect.ts              ← pnpm inspect — single Call-ID deep audit
+    │   └── report.ts               ← pnpm report  — daily/weekly rollup
+    │
+    ├── dashboard/
+    │   ├── server.ts               ← pnpm dashboard — HTTP + SSE
+    │   ├── store.ts                ← in-memory snapshot + SSE fan-out
+    │   └── views.ts                ← server-side response formatting
+    │
+    ├── llm/
+    │   ├── index.ts                ← provider factory
+    │   ├── provider-openai.ts      ← kimi · openai · gemini (one impl)
+    │   └── provider-claude.ts      ← Anthropic adapter
+    │
     ├── prompts/
-    │   └── system.ts          ← system prompt + health-check instructions
+    │   ├── system.ts               ← base identity + guard-rails
+    │   ├── missed-call.ts          ← batch summary prompt (watch)
+    │   ├── journey-audit.ts        ← single-call narrative (inspect)
+    │   └── audit-report.ts         ← periodic report (report)
+    │
+    ├── avoxi/
+    │   ├── client.ts               ← typed HTTP client over /cdrs, /agents, /live, /alerts
+    │   ├── auth.ts                 ← bearer-token handling + startup scope check
+    │   ├── endpoints.ts            ← URL constants (one diff per Avoxi change)
+    │   ├── types.ts                ← AvoxiCdr, AgentAction, AvoxiAgent, …
+    │   └── recording.ts            ← the only module that downloads audio (gated)
+    │
+    ├── domain/
+    │   ├── schedule.ts             ← on-call window predicates (tz-aware, pure)
+    │   ├── missed-call.ts          ← classifier: missed? + MissedReason
+    │   ├── journey.ts              ← AvoxiCdr → JourneyTimeline (the key fn)
+    │   └── report.ts               ← aggregation + trends for periodic reports
+    │
     ├── tools/
-    │   ├── avoxi.ts           ← AVOXI API client + TypeScript data models
-    │   └── index.ts           ← tool schemas (JSON Schema) + dispatcher
-    └── dashboard/
-        ├── server.ts          ← HTTP server + SSE endpoint + cron loop
-        └── store.ts           ← in-memory state: status, history, activity feed
+    │   ├── index.ts                ← tool catalog + dispatcher (LLM-facing)
+    │   ├── call-list.ts            ← list_calls
+    │   ├── call-journey.ts         ← get_call_journey
+    │   ├── recording.ts            ← get_recording_url
+    │   ├── transcription.ts        ← transcribe_call  (privacy-gated)
+    │   ├── agents.ts               ← list_agents + get_agent_timeline
+    │   ├── live.ts                 ← get_live_team
+    │   ├── alerts.ts               ← list_alert_logs
+    │   └── schedule.ts             ← is_on_call + classify_call (pure)
+    │
+    ├── privacy/
+    │   ├── policy.ts               ← declarative policy from config/privacy.yaml
+    │   └── gate.ts                 ← the single runtime choke point
+    │
+    ├── storage/
+    │   ├── audit-log.ts            ← SQLite access layer
+    │   └── schema.sql              ← tables: audit_runs · audited_calls ·
+    │                                 notifications · privacy_decisions
+    │
+    ├── notifier/
+    │   ├── index.ts                ← dispatcher
+    │   ├── slack.ts
+    │   ├── email.ts
+    │   ├── webhook.ts
+    │   └── whatsapp.ts             ← optional — replaces the manual group chat
+    │
+    └── report/
+        ├── render-markdown.ts
+        └── render-html.ts
 ```
+
+All `.ts` files are doc-header-only skeletons for now — implementation
+comes next. Each file names its responsibility, surface, and external
+dependencies so any contributor can pick one up in isolation.
 
 ---
 
-## Architecture
+## 4. Operating modes
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Entry points  (pick one)                                       │
-│                                                                 │
-│   pnpm query      →  cli.ts             one-shot, stdout        │
-│   pnpm monitor    →  monitor.ts         cron loop, stdout       │
-│   pnpm dashboard  →  dashboard/server   cron loop + web UI      │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-              config.ts  ──  loads .env, validates required vars
-                           │
-                           ▼
-              llm.ts  ──  builds the LLM client
-              │
-              ├─ kimi / openai / gemini  →  openai SDK
-              └─ claude                 →  ClaudeAdapter [SKELETON]
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  agent.ts  —  multi-turn loop (max 8 rounds)                    │
-│                                                                 │
-│  1. send [system prompt + user query] to LLM                    │
-│  2. LLM returns tool call  →  dispatch to tools/index.ts        │
-│  3. append result, repeat until LLM returns plain text          │
-│                                                                 │
-│  callbacks: onToolCall / onToolResult                           │
-│    · monitor    →  print to stdout                              │
-│    · dashboard  →  push to store → broadcast via SSE            │
-└──────────┬──────────────────────────────────────────────────────┘
-           │
-           ▼
-     tools/index.ts  ──  dispatches to avoxi.ts
-     │
-     ├─ get_system_health    ├─ get_active_calls
-     ├─ get_cdr_summary      ├─ get_trunks
-     ├─ get_cdrs             └─ get_dids
-     │
-     └──▶  AVOXI REST API v2  (auth: X-API-Key)
-```
-
-**Dashboard data flow**
-
-```
-agent callbacks
-      │  push events
-      ▼
-dashboard/store.ts  ──  current severity · last 50 checks · last 30 tool events
-      │  SSE broadcast
-      ▼
-dashboard/server.ts  ──  GET /events (SSE) · GET /api/status · GET /api/history
-      │
-      ▼
-web/index.html  ──  status badge · live activity feed · check history table
-```
-
----
-
-## LLM providers
-
-| Provider | `LLM_PROVIDER` value | Default model | SDK |
-|---|---|---|---|
-| Kimi (Moonshot AI) | `kimi` | `moonshot-v1-32k` | `openai` |
-| OpenAI | `openai` | `gpt-4o` | `openai` |
-| Google Gemini | `gemini` | `gemini-2.0-flash` | `openai` (compatible endpoint) |
-| Anthropic Claude | `claude` | `claude-sonnet-4-6` | `@anthropic-ai/sdk` *(adapter — skeleton)* |
-
-Kimi, OpenAI, and Gemini all speak the OpenAI-compatible wire format and share the same SDK. Claude uses the Anthropic SDK; `src/llm-claude.ts` adapts it to the same interface so `agent.ts` needs no changes.
-
-To complete the Claude adapter: `pnpm add @anthropic-ai/sdk`, then implement the three conversion methods inside `src/llm-claude.ts`.
-
----
-
-## Dashboard
-
-`pnpm dashboard` starts a web server at `http://localhost:3000` that runs the same monitor loop and exposes a live UI — no Slack, no email, no external services needed.
-
-| Section | What it shows |
-|---|---|
-| Status badge | Current severity (CRITICAL / WARNING / INFO) — color-coded, pulses on active alerts |
-| Last check summary | Full LLM response from the most recent health check |
-| Live activity feed | Real-time stream of every tool call the agent makes |
-| Check history | Last 50 checks with timestamp, severity, and summary |
-
-REST endpoints: `GET /` (UI) · `GET /api/status` · `GET /api/history` · `GET /events` (SSE stream)
-
----
-
-## Setup
-
-### Prerequisites
-
-- Node.js ≥ 20 and pnpm
-- An AVOXI admin API key + account ID
-- An API key for your chosen LLM provider
-
-### Install
-
-```bash
-pnpm install
-cp .env.example .env
-# edit .env — fill in AVOXI_API_KEY, AVOXI_ACCOUNT_ID, and your LLM credentials
-```
-
-### Verify
-
-```bash
-pnpm query "Is the AVOXI system healthy right now?"
-```
-
----
-
-## Usage
-
-### Ad-hoc queries
-
-```bash
-pnpm query "What was the failure rate in the last hour?"
-pnpm query "Show me all failed calls between 2pm and 4pm today"
-pnpm query "Are there any suspended or porting DIDs?"
-pnpm query "Which trunks are close to capacity?"
-pnpm query "What SIP error codes are we seeing most in the last 2 hours?"
-pnpm query "Walk me through everything that happened between 10am and 11am today"
-```
-
-### Background monitor (stdout)
-
-```bash
-pnpm monitor
-# pipe to a log file:
-pnpm monitor >> /var/log/avoxi-agent.log 2>&1
-```
-
-### Web dashboard
-
-```bash
-pnpm dashboard
-# open http://localhost:3000
-```
-
----
-
-## Available tools (function calls)
-
-| Tool | What it does |
-|---|---|
-| `get_system_health` | Probes AVOXI API availability and measures latency |
-| `get_cdr_summary` | Aggregates up to 1,000 CDRs: failure rate, short-call rate, avg duration, SIP breakdown |
-| `get_cdrs` | Raw CDR records with filters (date range, disposition, DID, direction) |
-| `get_active_calls` | Real-time active call list |
-| `get_trunks` | SIP trunk status and concurrent call counts |
-| `get_dids` | DID phone numbers with status and assignment |
-
----
-
-## Alert thresholds (configurable in `.env`)
-
-| Condition | Severity |
-|---|---|
-| Failure rate ≥ 40% · trunk down · API unreachable | **CRITICAL** |
-| Failure rate 15–40% · short-call rate ≥ 20% · trunk >80% capacity · latency >2s | **WARNING** |
-| Everything within normal range | **INFO** |
-
----
-
-## Environment variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `AVOXI_API_KEY` | yes | — | AVOXI admin API key |
-| `AVOXI_ACCOUNT_ID` | yes | — | AVOXI account ID |
-| `LLM_PROVIDER` | no | `kimi` | `kimi` \| `openai` \| `gemini` \| `claude` |
-| `KIMI_API_KEY` | if kimi | — | Moonshot AI key |
-| `KIMI_MODEL` | no | `moonshot-v1-32k` | |
-| `OPENAI_API_KEY` | if openai | — | OpenAI key |
-| `OPENAI_MODEL` | no | `gpt-4o` | |
-| `GEMINI_API_KEY` | if gemini | — | Google AI Studio key |
-| `GEMINI_MODEL` | no | `gemini-2.0-flash` | |
-| `CLAUDE_API_KEY` | if claude | — | Anthropic key |
-| `CLAUDE_MODEL` | no | `claude-sonnet-4-6` | |
-| `COMPANY_NAME` | no | `your organization` | Used in the LLM system prompt |
-| `MONITOR_CRON` | no | `*/5 * * * *` | Cron schedule |
-| `DASHBOARD_PORT` | no | `3000` | Web dashboard port |
-| `FAILURE_RATE_CRITICAL` | no | `40` | Critical threshold (%) |
-| `FAILURE_RATE_WARNING` | no | `15` | Warning threshold (%) |
-| `SHORT_CALL_WARNING` | no | `20` | Short-call threshold (%) |
-| `MIN_CALLS_FOR_DETECTION` | no | `5` | Min calls before alerting |
-
----
-
-## What's complete (skeleton)
-
-- Full agent loop with multi-turn tool-calling
-- All 6 AVOXI API integrations with TypeScript types
-- All three entry points (CLI, monitor, dashboard)
-- Kimi, OpenAI, Gemini fully wired; Claude adapter skeleton ready to implement
-- Dashboard web UI — SSE-based live updates, no framework
-- In-memory state store with SSE broadcast to all connected tabs
-- System prompt with severity logic and SIP code guide
-- Config validation with clear error messages on missing vars
-
-## What's not yet implemented
-
-| Item | Where | Notes |
+| Mode | Command | Purpose |
 |---|---|---|
-| Claude adapter | `src/llm-claude.ts` | Install `@anthropic-ai/sdk`, implement 3 conversion methods |
-| Slack webhook | `src/monitor.ts` / `src/dashboard/server.ts` | Env var defined, POST not wired |
-| Email via SMTP | same | Env vars defined, send logic not wired |
-| CDR pagination > 1,000 | `src/tools/avoxi.ts` | Cursor-based pagination needed |
-| Test suite | — | Unit + integration tests |
-| Docker / deployment | — | Dockerfile + docker-compose |
+| Batch audit | `pnpm audit [--since=<iso>] [--until=<iso>]` | Audit a window (default: previous on-call shift) and produce a report. |
+| Watch daemon | `pnpm watch` | Long-running; polls `/cdrs` during on-call windows and alerts on new unanswered calls. Replaces the manual WhatsApp flow. |
+| Inspect | `pnpm inspect <avoxi_call_id>` | Replaces the "look it up on the Avoxi panel" step. Prints a full journey + LLM audit. |
+| Report | `pnpm report [--from] [--to] [--format=md\|html]` | Daily/weekly/monthly rollup for stakeholders. |
+| Dashboard | `pnpm dashboard` | Web UI at `http://localhost:3000` with SSE live feed + historical browse. |
 
 ---
 
-## Troubleshooting
+## 5. Environment
 
-**`AVOXI API error 401`** — `AVOXI_API_KEY` is wrong or expired. Regenerate in AVOXI dashboard.
+Required to start the agent at all:
 
-**`AVOXI API error 403`** — API key lacks CDR read permission. Check scope in Settings → API Access.
+- `AVOXI_API_TOKEN` — bearer token with scope for CDRs, agents, live, alerts.
+- `LLM_PROVIDER` + the matching `*_API_KEY`.
 
-**`Missing required env var`** — copy `.env.example` to `.env` and fill in the flagged variable.
+Recommended:
 
-**`Agent exceeded 8 tool rounds`** — LLM is looping. Check that tools return valid JSON and the system prompt is unambiguous.
+- `COMPANY_NAME=Grupo Wellness`
+- `SLACK_WEBHOOK_URL` (or another notifier)
+
+Privacy flags (all default **off**):
+
+- `RECORDINGS_ENABLED`
+- `TRANSCRIPTION_ENABLED`
+- `TRANSCRIPTION_PROVIDER`
+
+See `.env.example` for the complete list and `docs/PRIVACY.md` for the
+governance model.
 
 ---
 
-## Adding a new tool
+## 6. Roadmap
 
-1. Add the fetch function to `src/tools/avoxi.ts`
-2. Add the JSON Schema definition to the `TOOLS` array in `src/tools/index.ts`
-3. Add the dispatch case to `dispatchTool` in `src/tools/index.ts`
-4. Update the system prompt in `src/prompts/system.ts` if the LLM needs guidance on when to use it
+| Milestone | Scope |
+|---|---|
+| **M1 — skeleton** (this commit) | File tree + architecture + policy documents. No runtime code. |
+| **M2 — read path** | `avoxi/client.ts`, `domain/journey.ts`, `domain/missed-call.ts`, `domain/schedule.ts`, `storage/`, `cli/audit.ts`. Validates end-to-end against real Avoxi traffic without any LLM. |
+| **M3 — LLM audit** | Port/rewrite the agent loop + tools + prompts. `cli/inspect` and `cli/report` become useful. |
+| **M4 — watch + notifier** | Cron daemon + Slack/WhatsApp. This is the piece that replaces the manual WhatsApp flow. |
+| **M5 — dashboard** | Web UI with live SSE feed and historical browse. |
+| **M6 — recording audit** | Flip privacy flags on after legal review. Implement `transcription.ts` + redaction pipeline. |
+
+---
+
+## 7. Why not just subscribe to Avoxi's own alerts?
+
+Avoxi has `/alerts/logs` — we use it, but as an input, not the system
+of record. Two reasons:
+
+1. **Avoxi's alerts are infra-oriented** (trunk down, API errors). They
+   don't fire on "a customer called at 03:17 ART during the weeknight
+   on-call window and nobody picked up" — because that's not a
+   malfunction from Avoxi's point of view.
+2. **We want on-call-aware classification.** The same missed call
+   at 14:00 on a Tuesday is "expected; business hours, not our
+   problem" and at 03:17 on Wednesday is "page the on-call tech". Only
+   our schedule knows this.
+
+Avoxi's alerts are cross-referenced in reports ("this gap coincides with
+Avoxi incident #abc123") but never drive detection on their own.

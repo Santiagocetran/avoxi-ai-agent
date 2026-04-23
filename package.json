@@ -1,13 +1,14 @@
 {
   "name": "avoxi-ai-agent",
-  "version": "0.1.0",
-  "description": "AI agent for AVOXI telephony monitoring — multi-LLM, function-calling, web dashboard",
+  "version": "0.2.0",
+  "description": "AI auditor for Avoxi's call journey — detects unanswered calls during on-call hours and (optionally) audits recordings.",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/cli.ts",
-    "monitor": "tsx src/monitor.ts",
+    "audit": "tsx src/cli/audit.ts",
+    "watch": "tsx src/cli/watch.ts",
+    "inspect": "tsx src/cli/inspect.ts",
+    "report": "tsx src/cli/report.ts",
     "dashboard": "tsx src/dashboard/server.ts",
-    "query": "tsx src/cli.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
@@ -16,11 +17,14 @@
     "zod": "^3.23.8",
     "dotenv": "^16.4.5",
     "node-cron": "^3.0.3",
-    "chalk": "^5.3.0"
+    "chalk": "^5.3.0",
+    "yaml": "^2.4.5",
+    "better-sqlite3": "^11.1.2"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/node-cron": "^20.0.0",
+    "@types/better-sqlite3": "^7.6.10",
     "tsx": "^4.15.7",
     "typescript": "^5.5.3"
   },

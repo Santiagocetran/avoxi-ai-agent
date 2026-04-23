@@ -1,0 +1,24 @@
+# On-call schedule — consumed by src/domain/schedule.ts.
+#
+# The system is considered "on-call" whenever the current time (converted
+# to `timezone`) falls inside any of the listed windows.
+#
+# STATUS: DEFAULTS for Grupo Wellness. Adjust per real coverage.
+
+timezone: America/Argentina/Buenos_Aires
+
+windows:
+  - name: weekday_night
+    days: [Mon, Tue, Wed, Thu, Fri]
+    start: "21:00"
+    end:   "09:00+1"   # crosses midnight into next day
+
+  - name: saturday
+    days: [Sat]
+    start: "00:00"
+    end:   "24:00"
+
+  - name: sunday
+    days: [Sun]
+    start: "00:00"
+    end:   "24:00"

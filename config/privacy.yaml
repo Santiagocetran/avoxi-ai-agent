@@ -1,0 +1,23 @@
+# Privacy policy consumed by src/privacy/policy.ts.
+#
+# DEFAULT STANCE: opt-in. Nothing audio-related happens until explicitly
+# enabled here. The SW-lead recommendation flagged audio/transcription as
+# requiring legal review — this file is where that decision is encoded.
+
+recordings:
+  enabled: false                  # download recordings at all
+  retention_days: 7               # delete local copies after N days
+
+transcription:
+  enabled: false                  # send audio to an STT provider
+  provider: null                  # 'openai-whisper' | 'gemini' | 'local-whisper'
+  allowed_locales: [es, en]
+
+redaction:
+  # applied to any transcript before it reaches the LLM or storage
+  patterns:
+    - { name: phone,        regex: '\+?\d[\d\s().-]{6,}\d' }
+    - { name: email,        regex: '[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}' }
+    - { name: credit_card,  regex: '\b(?:\d[ -]*?){13,16}\b' }
+
+legal_basis: legitimate_interest  # 'consent' | 'legitimate_interest' | 'none'

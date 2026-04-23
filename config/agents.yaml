@@ -1,0 +1,16 @@
+# Local agent directory — populated once at setup, enriched at runtime by
+# GET /agents. Used by domain/missed-call.ts to know who "should have been
+# available" during on-call windows.
+#
+# Each entry maps an Avoxi agent_id (UUID) to a friendly name + on-call
+# rotation group. Groups are then referenced in schedule.yaml if the
+# rotation varies per weekday.
+
+agents: []
+
+# Example:
+# agents:
+#   - agent_id: efe98158-0c39-4351-8fc3-0f41802fddae
+#     name: Jane Doe
+#     rotation: weeknight
+#     extension: "4242"
