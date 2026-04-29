@@ -105,10 +105,10 @@ contract is fixed, implementation lands in M1 (§6).
 
 | Module | Surface | Hides |
 |---|---|---|
-| `config.ts` | `loadConfig(): AppConfig` | env parsing, YAML parsing, zod validation, defaults |
-| `avoxi.ts` | `listCalls(since, until): Promise<Call[]>` | HTTP, bearer auth, base URL, pagination, retries, response envelope |
-| `journey.ts` | `classify(call, schedule): Analysis`, `isOnCall(at, schedule): boolean` | journey reconstruction rules, missed-call taxonomy |
-| `audit.ts` | `auditWindow(since, until, config): Promise<string>` | LLM provider wiring, prompt text, output formatting |
+| `config.ts` | `loadConfig(): AppConfig` | env parsing, YAML parsing, zod validation, defaults, per-provider LLM base URL |
+| `avoxi.ts` | `createAvoxiClient(cfg): { listCalls(since, until): Promise<Call[]> }` | HTTP, bearer auth, base URL, pagination, retries, response envelope, wire→domain mapping |
+| `journey.ts` | `classify(call, schedule): Analysis`, `isOnCall(at, schedule): boolean`, `previousShift(now, schedule): { since, until }` | journey reconstruction rules, missed-call taxonomy, timezone arithmetic |
+| `audit.ts` | `auditWindow(since, until, config): Promise<string>` | LLM client construction, prompt text, output formatting |
 | `cli.ts` | — | argv parsing, window resolution |
 
 Full types (`AppConfig`, `Call`, `Analysis`, `MissReason`, …) live in the
