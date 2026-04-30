@@ -14,20 +14,27 @@ unanswered calls during on-call hours.**
    calendar, tagging a reason from a controlled vocabulary.
 4. Sends the classified set to an LLM and returns a narrative report.
 
-One-time setup:
+## Quickstart
 
 ```bash
+# 1. Install dependencies (creates .venv, generates uv.lock)
 uv sync
-```
 
-One command:
+# 2. Configure credentials
+cp .env.example .env
+# edit .env — set AVOXI_API_TOKEN, LLM_PROVIDER, LLM_API_KEY, LLM_MODEL
 
-```bash
-uv run audit [--since=<iso>] [--until=<iso>]
+# 3. Adjust on-call windows if needed
+$EDITOR config/schedule.yaml
+
+# 4. Run
+uv run audit                                                # previous on-call shift
+uv run audit --since=2026-04-28T21:00:00-03:00 --until=2026-04-29T09:00:00-03:00
 ```
 
 Default window when no flags are given: the previous completed on-call shift
-(e.g. last night 21:00 -> 09:00 ART).
+(e.g. last night 21:00 -> 09:00 ART). `--since` and `--until` must include a
+timezone offset; naive datetimes are rejected.
 
 ---
 
@@ -66,9 +73,11 @@ cli.py
   |
   +- audit_window(since, until, config)
        |
-       +- AvoxiClient(cfg)
+       +- AvoxiClient(cfg)             (context manager)
        |    .list_calls(since, until)    -> list[Call]
-       |    httpx + bearer auth + pagination + 3x backoff
+       |    httpx + bearer auth + pagination
+       |    retry: 429/5xx with Retry-After + exp backoff (60s cap)
+       |          401/403/4xx fail fast
        |    wire shape private behind pydantic schema
        |
        +- journey.classify(call, schedule) -> Analysis
@@ -121,36 +130,51 @@ avoxi-ai-agent/
 ### Key types
 
 ```python
-# config.py
-AppConfig = {
-    "avoxi": {"token": str, "base_url": str},
-    "llm": {
-        "provider": "kimi|openai|gemini",
-        "api_key": str,
-        "model": str,
-        "base_url": str | None,
-    },
-    "schedule": Schedule,
-    "company_name": str,
-}
+# config.py — pydantic v2 models (validate env + YAML at boundary)
+class AvoxiConfig(BaseModel):
+    token: str
+    base_url: str = "https://genius.avoxi.com/api/v2"
 
-# avoxi.py
-Call = {
-    "id": str,
-    "status": "answered|unanswered|voicemail",
-    "direction": "inbound|outbound|internal",
-    "from_": str,
-    "to": str,
-    "started_at": datetime,
-    "answered_at": datetime | None,
-    "ended_at": datetime,
-    "forwarded_to": list[str],
-    "events": list[Event],
-    "prior_extension": str | None,
-    "final_destination": str | None,
-}
+class LlmConfig(BaseModel):
+    provider: Literal["kimi", "openai", "gemini"]
+    api_key:  str
+    model:    str
+    base_url: str | None    # None => use OpenAI SDK default
 
-# journey.py
+class AppConfig(BaseModel):
+    avoxi:        AvoxiConfig
+    llm:          LlmConfig
+    schedule:     Schedule
+    company_name: str = "your company"
+
+# avoxi.py — frozen dataclass (domain type)
+@dataclass(frozen=True)
+class Call:
+    id:                str
+    status:            Literal["answered", "unanswered", "voicemail"]
+    direction:         Literal["inbound", "outbound", "internal"]
+    from_:             str                       # `from` is a keyword
+    to:                str
+    started_at:        datetime
+    answered_at:       datetime | None
+    ended_at:          datetime
+    forwarded_to:      list[str]
+    events:            list[Event]
+    prior_extension:   str | None = None
+    final_destination: str | None = None
+
+# journey.py — discriminated union (reason only on missed calls)
+@dataclass(frozen=True)
+class MissedAnalysis:
+    steps:  list[Step]
+    reason: MissReason
+    missed: Literal[True] = True
+
+@dataclass(frozen=True)
+class AnsweredAnalysis:
+    steps:  list[Step]
+    missed: Literal[False] = False
+
 Analysis = MissedAnalysis | AnsweredAnalysis
 ```
 
