@@ -3,10 +3,6 @@
 **An agent that audits Avoxi's call journey via the v2 API and reports
 unanswered calls during on-call hours.**
 
-Project-proposal MVP. The tree below is the entire scaffold — five
-TypeScript modules, one schedule file — designed to communicate the idea
-and then grow deliberately.
-
 ---
 
 ## 1. What the project does
@@ -24,52 +20,58 @@ One command:
 pnpm audit [--since=<iso>] [--until=<iso>]
 ```
 
-Default window is the previous on-call shift (e.g. last night 21:00 → 09:00 ART).
+Default window when no flags are given: the previous completed on-call shift
+(e.g. last night 21:00 → 09:00 ART).
 
 ---
 
 ## 2. Design principles
 
-This project follows John Ousterhout's *A Philosophy of Software Design*
-from the first commit:
+This project follows John Ousterhout's *A Philosophy of Software Design*:
 
-- **Deep modules.** Every file earns its keep by hiding substantial
-  complexity behind a narrow interface. `avoxi.ts` hides HTTP, auth,
-  pagination and retries behind one function. `journey.ts` hides all
-  classification rules behind `classify(call, schedule)`.
-- **Information hiding.** Avoxi's wire shape (`avoxi_call_id`,
-  `agent_actions`, etc.) stops at `avoxi.ts`. Downstream modules see
-  domain-neutral names.
+- **Deep modules.** Every file hides substantial complexity behind a narrow
+  interface. `avoxi.ts` hides HTTP, auth, pagination and retries behind a
+  single factory. `journey.ts` hides all classification rules behind
+  `classify(call, schedule)`.
+- **Information hiding.** Avoxi's wire shape (`avoxi_call_id`, `agent_actions`,
+  etc.) stops at `avoxi.ts`. Downstream modules see domain-neutral names.
+  Provider-specific LLM base URLs stop at `config.ts`; every other module
+  receives a plain URL string.
 - **Define errors out of existence.** `listCalls` returns `[]` for empty
   windows. `classify` never throws; unknown shapes fall to `reason: 'unknown'`.
-- **Pure where it can be.** `journey.ts` has no I/O and no dependency
-  on `Date.now()` — its only time anchor is `call.startedAt`. If the
-  watch-daemon phase needs "is *now* on-call?", that's a separate
-  `isOnCall(at, schedule)` helper, not a parameter contaminating the
-  classifier.
-- **Strategic > tactical.** Five modules now beats thirty-eight modules
-  later; the skeleton's shape is what the real code will inherit.
+  `Analysis` is a discriminated union — `reason` only exists on the type when
+  `missed: true`, so answered calls cannot accidentally carry a miss reason.
+- **Pure where it can be.** `journey.ts` has no I/O and no dependency on
+  `Date.now()`. Its only time anchors are `call.startedAt` and the explicit
+  `now` argument to `previousShift`.
+- **Strategic > tactical.** Five modules beats thirty-eight; the shape chosen
+  here is what M2 and M3 will extend without changing.
 
 ---
 
 ## 3. Architecture
 
 ```
-   cli.ts
-      │
-      ▼
-   config.loadConfig()          ─► AppConfig
-      │                              (avoxi, llm, schedule, companyName)
-      ▼
-   audit.auditWindow(since, until, config)
-      │
-      ├──► avoxi.listCalls(since, until)     ─► Call[]
-      │         (hides HTTP · auth · pagination · retries)
-      │
-      ├──► journey.classify(call, schedule)  ─► { steps, missed, reason }
-      │         (pure; anchor = call.startedAt)
-      │
-      └──► LLM (OpenAI-wire)                 ─► narrative (markdown)
+cli.ts
+  │
+  ├─ loadConfig()                        → AppConfig
+  │    dotenv + schedule.yaml + zod
+  │    resolves provider base URL here
+  │
+  └─ auditWindow(since, until, config)
+       │
+       ├─ createAvoxiClient(cfg)
+       │    .listCalls(since, until)     → Call[]
+       │    fetch · bearer auth · pagination · 3× backoff
+       │    wire shape private behind zod schema
+       │
+       ├─ classify(call, schedule)       → Analysis
+       │    pure · no I/O · no Date.now()
+       │    Analysis = { missed: true, reason, steps }
+       │             | { missed: false, steps }
+       │
+       └─ OpenAI({ apiKey, baseURL })    → markdown narrative
+            compact JSON summary → system + user prompt
 ```
 
 No dashboards, no persistence, no notifications, no function-calling
@@ -83,21 +85,19 @@ agent loop. Those are deferred — see §6.
 avoxi-ai-agent/
 ├── README.md
 ├── package.json
+├── pnpm-lock.yaml
 ├── tsconfig.json
 ├── .env.example
 ├── .gitignore
 ├── config/
-│   └── schedule.yaml       ← on-call windows (ART default)
+│   └── schedule.yaml       ← on-call windows (ART, Grupo Wellness defaults)
 └── src/
     ├── cli.ts              ← entry point; argv → auditWindow → stdout
     ├── config.ts           ← .env + schedule.yaml → validated AppConfig
-    ├── avoxi.ts            ← Avoxi v2 client; hides HTTP + pagination
-    ├── journey.ts          ← classify(call, schedule) — pure
-    └── audit.ts            ← orchestrator; pipes list → classify → LLM
+    ├── avoxi.ts            ← Avoxi v2 client; hides HTTP, pagination, wire shape
+    ├── journey.ts          ← classify / isOnCall / previousShift — pure
+    └── audit.ts            ← orchestrator; list → classify → LLM narrative
 ```
-
-Every `.ts` file is a doc-header-only skeleton at this point — the
-contract is fixed, implementation lands in M1 (§6).
 
 ---
 
@@ -105,27 +105,57 @@ contract is fixed, implementation lands in M1 (§6).
 
 | Module | Surface | Hides |
 |---|---|---|
-| `config.ts` | `loadConfig(): AppConfig` | env parsing, YAML parsing, zod validation, defaults, per-provider LLM base URL |
+| `config.ts` | `loadConfig(): AppConfig` | env parsing, YAML parsing, zod validation, defaults, per-provider LLM base URL resolution |
 | `avoxi.ts` | `createAvoxiClient(cfg): { listCalls(since, until): Promise<Call[]> }` | HTTP, bearer auth, base URL, pagination, retries, response envelope, wire→domain mapping |
-| `journey.ts` | `classify(call, schedule): Analysis`, `isOnCall(at, schedule): boolean`, `previousShift(now, schedule): { since, until }` | journey reconstruction rules, missed-call taxonomy, timezone arithmetic |
+| `journey.ts` | `classify(call, schedule): Analysis`<br>`isOnCall(at, schedule): boolean`<br>`previousShift(now, schedule): { since, until }` | journey reconstruction rules, missed-call taxonomy, timezone arithmetic |
 | `audit.ts` | `auditWindow(since, until, config): Promise<string>` | LLM client construction, prompt text, output formatting |
 | `cli.ts` | — | argv parsing, window resolution |
 
-Full types (`AppConfig`, `Call`, `Analysis`, `MissReason`, …) live in the
-relevant module's doc header.
+### Key types
+
+```ts
+// config.ts
+AppConfig = {
+  avoxi:       { token: string; baseUrl: string };
+  llm:         { provider: 'kimi'|'openai'|'gemini'; apiKey: string;
+                 model: string; baseUrl: string };   // baseUrl always resolved
+  schedule:    Schedule;
+  companyName: string;
+};
+
+// avoxi.ts
+Call  = { id, status, direction, from, to, startedAt, answeredAt?,
+          endedAt, forwardedTo, events, priorExtension?, finalDestination? };
+Event = { at: Date; kind: string; actor?: string };
+
+// journey.ts
+Analysis = { steps: Step[]; missed: true;  reason: MissReason }
+         | { steps: Step[]; missed: false };            // discriminated union
+
+MissReason = 'no_agent_on_duty' | 'agent_declined' | 'ring_timeout'
+           | 'queue_abandoned'  | 'voicemail_left'  | 'voicemail_empty'
+           | 'routing_failure'  | 'off_hours_expected' | 'unknown';
+```
 
 ---
 
 ## 6. Roadmap
 
-| Phase | Scope |
-|---|---|
-| **M1 — MVP** (this repo) | Implement the five modules. `pnpm audit` produces a narrative for a given window. |
-| **M2 — Recording audit** | After legal sign-off on transcription, extend `avoxi.ts` with the 24 h pre-signed recording URL and pipe downloaded audio through a transcription + redaction step. |
-| **M3 — Continuous operation** | Watch daemon (replaces the manual WhatsApp missed-call flow), SQLite persistence so alerts dedupe, notifier (Slack/WhatsApp), dashboard for historical browse. |
+| Phase | Status | Scope |
+|---|---|---|
+| **M1 — MVP** | ✅ Done | Five modules implemented. `pnpm audit` produces a narrative for any window. |
+| **M2 — Recording audit** | Pending legal | Extend `avoxi.ts` with the 24 h pre-signed recording URL; pipe audio through transcription + redaction; distinguish `voicemail_empty` from `voicemail_left`. |
+| **M3 — Continuous operation** | Deferred | Watch daemon (replaces manual WhatsApp flow), SQLite persistence for deduplication, notifier (Slack/WhatsApp), dashboard for historical browse. |
 
-Every phase adds to the tree; none of them change the five MVP modules'
-contracts.
+Every phase adds to the tree; the five MVP module contracts are stable.
+
+### M1 open items
+
+Before running against production, verify the Avoxi wire field names in
+`avoxi.ts` against a live `/cdrs` response. Known confirmed: `avoxi_call_id`,
+`agent_actions`, `{ data: [...] }` envelope. Fields marked `// TODO(M1)`:
+`caller_id`, `dialed_number`, `start_time`, `end_time`, `forwarded_to`,
+`next_cursor`. Drop a sample in `tmp/sample-cdrs.json` to align.
 
 ---
 
@@ -134,13 +164,17 @@ contracts.
 Required:
 
 - `AVOXI_API_TOKEN` — bearer token with CDR read scope.
-- `LLM_PROVIDER` + `LLM_API_KEY` + `LLM_MODEL` — one of `kimi | openai | gemini`.
+- `LLM_PROVIDER` — one of `kimi | openai | gemini`.
+- `LLM_API_KEY` — API key for the chosen provider.
+- `LLM_MODEL` — model name (e.g. `moonshot-v1-32k`, `gpt-4o`, `gemini-1.5-pro`).
 
-Recommended:
+Optional:
 
-- `COMPANY_NAME` — quoted in the narrative.
+- `AVOXI_BASE_URL` — defaults to `https://genius.avoxi.com/api/v2`.
+- `LLM_BASE_URL` — overrides the default base URL for the chosen provider.
+- `COMPANY_NAME` — quoted in the narrative; defaults to `"your company"`.
 
-See `.env.example` for the complete list.
+See `.env.example` for the full list.
 
 ---
 
