@@ -14,14 +14,20 @@ unanswered calls during on-call hours.**
    calendar, tagging a reason from a controlled vocabulary.
 4. Sends the classified set to an LLM and returns a narrative report.
 
+One-time setup:
+
+```bash
+uv sync
+```
+
 One command:
 
 ```bash
-pnpm audit [--since=<iso>] [--until=<iso>]
+uv run audit [--since=<iso>] [--until=<iso>]
 ```
 
 Default window when no flags are given: the previous completed on-call shift
-(e.g. last night 21:00 → 09:00 ART).
+(e.g. last night 21:00 -> 09:00 ART).
 
 ---
 
@@ -30,20 +36,20 @@ Default window when no flags are given: the previous completed on-call shift
 This project follows John Ousterhout's *A Philosophy of Software Design*:
 
 - **Deep modules.** Every file hides substantial complexity behind a narrow
-  interface. `avoxi.ts` hides HTTP, auth, pagination and retries behind a
-  single factory. `journey.ts` hides all classification rules behind
+  interface. `avoxi.py` hides HTTP, auth, pagination and retries behind a
+  single context manager. `journey.py` hides all classification rules behind
   `classify(call, schedule)`.
 - **Information hiding.** Avoxi's wire shape (`avoxi_call_id`, `agent_actions`,
-  etc.) stops at `avoxi.ts`. Downstream modules see domain-neutral names.
-  Provider-specific LLM base URLs stop at `config.ts`; every other module
-  receives a plain URL string.
-- **Define errors out of existence.** `listCalls` returns `[]` for empty
+  etc.) stops at `avoxi.py`. Downstream modules see domain-neutral names.
+  Provider-specific LLM base URLs stop at `config.py`; every other module
+  receives a plain URL string or `None` for the OpenAI SDK default.
+- **Define errors out of existence.** `list_calls` returns `[]` for empty
   windows. `classify` never throws; unknown shapes fall to `reason: 'unknown'`.
-  `Analysis` is a discriminated union — `reason` only exists on the type when
+  `Analysis` is a discriminated union: `reason` only exists on the type when
   `missed: true`, so answered calls cannot accidentally carry a miss reason.
-- **Pure where it can be.** `journey.ts` has no I/O and no dependency on
-  `Date.now()`. Its only time anchors are `call.startedAt` and the explicit
-  `now` argument to `previousShift`.
+- **Pure where it can be.** `journey.py` has no I/O and no dependency on
+  `datetime.now()`. Its only time anchors are `call.started_at` and the explicit
+  `now` argument to `previous_shift`.
 - **Strategic > tactical.** Five modules beats thirty-eight; the shape chosen
   here is what M2 and M3 will extend without changing.
 
@@ -52,30 +58,30 @@ This project follows John Ousterhout's *A Philosophy of Software Design*:
 ## 3. Architecture
 
 ```
-cli.ts
-  │
-  ├─ loadConfig()                        → AppConfig
-  │    dotenv + schedule.yaml + zod
-  │    resolves provider base URL here
-  │
-  └─ auditWindow(since, until, config)
-       │
-       ├─ createAvoxiClient(cfg)
-       │    .listCalls(since, until)     → Call[]
-       │    fetch · bearer auth · pagination · 3× backoff
-       │    wire shape private behind zod schema
-       │
-       ├─ classify(call, schedule)       → Analysis
-       │    pure · no I/O · no Date.now()
-       │    Analysis = { missed: true, reason, steps }
-       │             | { missed: false, steps }
-       │
-       └─ OpenAI({ apiKey, baseURL })    → markdown narrative
-            compact JSON summary → system + user prompt
+cli.py
+  |
+  +- load_config()                       -> AppConfig
+  |    dotenv + schedule.yaml + pydantic
+  |    resolves provider base URL here
+  |
+  +- audit_window(since, until, config)
+       |
+       +- AvoxiClient(cfg)
+       |    .list_calls(since, until)    -> list[Call]
+       |    httpx + bearer auth + pagination + 3x backoff
+       |    wire shape private behind pydantic schema
+       |
+       +- journey.classify(call, schedule) -> Analysis
+       |    pure + no I/O + no datetime.now()
+       |    Analysis = MissedAnalysis(reason, steps)
+       |             | AnsweredAnalysis(steps)
+       |
+       +- OpenAI(api_key, base_url)      -> markdown narrative
+            compact JSON summary -> system + user prompt
 ```
 
 No dashboards, no persistence, no notifications, no function-calling
-agent loop. Those are deferred — see §6.
+agent loop. Those are deferred - see §6.
 
 ---
 
@@ -84,19 +90,20 @@ agent loop. Those are deferred — see §6.
 ```
 avoxi-ai-agent/
 ├── README.md
-├── package.json
-├── pnpm-lock.yaml
-├── tsconfig.json
+├── pyproject.toml
+├── uv.lock
 ├── .env.example
 ├── .gitignore
 ├── config/
-│   └── schedule.yaml       ← on-call windows (ART, Grupo Wellness defaults)
+│   └── schedule.yaml
 └── src/
-    ├── cli.ts              ← entry point; argv → auditWindow → stdout
-    ├── config.ts           ← .env + schedule.yaml → validated AppConfig
-    ├── avoxi.ts            ← Avoxi v2 client; hides HTTP, pagination, wire shape
-    ├── journey.ts          ← classify / isOnCall / previousShift — pure
-    └── audit.ts            ← orchestrator; list → classify → LLM narrative
+    └── avoxi_audit/
+        ├── __init__.py
+        ├── config.py
+        ├── avoxi.py
+        ├── journey.py
+        ├── audit.py
+        └── cli.py
 ```
 
 ---
@@ -105,36 +112,46 @@ avoxi-ai-agent/
 
 | Module | Surface | Hides |
 |---|---|---|
-| `config.ts` | `loadConfig(): AppConfig` | env parsing, YAML parsing, zod validation, defaults, per-provider LLM base URL resolution |
-| `avoxi.ts` | `createAvoxiClient(cfg): { listCalls(since, until): Promise<Call[]> }` | HTTP, bearer auth, base URL, pagination, retries, response envelope, wire→domain mapping |
-| `journey.ts` | `classify(call, schedule): Analysis`<br>`isOnCall(at, schedule): boolean`<br>`previousShift(now, schedule): { since, until }` | journey reconstruction rules, missed-call taxonomy, timezone arithmetic |
-| `audit.ts` | `auditWindow(since, until, config): Promise<string>` | LLM client construction, prompt text, output formatting |
-| `cli.ts` | — | argv parsing, window resolution |
+| `config.py` | `load_config() -> AppConfig` | env parsing, YAML parsing, pydantic validation, defaults, per-provider LLM base URL resolution |
+| `avoxi.py` | `AvoxiClient(cfg)` (context manager); `client.list_calls(since, until) -> list[Call]` | HTTP, bearer auth, base URL, pagination, retries, response envelope, wire→domain mapping, socket lifecycle |
+| `journey.py` | `classify(call, schedule) -> Analysis`<br>`is_on_call(at, schedule) -> bool`<br>`previous_shift(now, schedule) -> tuple[datetime, datetime]` | journey reconstruction rules, missed-call taxonomy, timezone arithmetic |
+| `audit.py` | `audit_window(since, until, config) -> str` | LLM client construction, prompt text, output formatting, zero-call short-circuit |
+| `cli.py` | `main()` | argparse parsing, window resolution, naive-datetime rejection |
 
 ### Key types
 
-```ts
-// config.ts
+```python
+# config.py
 AppConfig = {
-  avoxi:       { token: string; baseUrl: string };
-  llm:         { provider: 'kimi'|'openai'|'gemini'; apiKey: string;
-                 model: string; baseUrl: string };   // baseUrl always resolved
-  schedule:    Schedule;
-  companyName: string;
-};
+    "avoxi": {"token": str, "base_url": str},
+    "llm": {
+        "provider": "kimi|openai|gemini",
+        "api_key": str,
+        "model": str,
+        "base_url": str | None,
+    },
+    "schedule": Schedule,
+    "company_name": str,
+}
 
-// avoxi.ts
-Call  = { id, status, direction, from, to, startedAt, answeredAt?,
-          endedAt, forwardedTo, events, priorExtension?, finalDestination? };
-Event = { at: Date; kind: string; actor?: string };
+# avoxi.py
+Call = {
+    "id": str,
+    "status": "answered|unanswered|voicemail",
+    "direction": "inbound|outbound|internal",
+    "from_": str,
+    "to": str,
+    "started_at": datetime,
+    "answered_at": datetime | None,
+    "ended_at": datetime,
+    "forwarded_to": list[str],
+    "events": list[Event],
+    "prior_extension": str | None,
+    "final_destination": str | None,
+}
 
-// journey.ts
-Analysis = { steps: Step[]; missed: true;  reason: MissReason }
-         | { steps: Step[]; missed: false };            // discriminated union
-
-MissReason = 'no_agent_on_duty' | 'agent_declined' | 'ring_timeout'
-           | 'queue_abandoned'  | 'voicemail_left'  | 'voicemail_empty'
-           | 'routing_failure'  | 'off_hours_expected' | 'unknown';
+# journey.py
+Analysis = MissedAnalysis | AnsweredAnalysis
 ```
 
 ---
@@ -143,19 +160,20 @@ MissReason = 'no_agent_on_duty' | 'agent_declined' | 'ring_timeout'
 
 | Phase | Status | Scope |
 |---|---|---|
-| **M1 — MVP** | ✅ Done | Five modules implemented. `pnpm audit` produces a narrative for any window. |
-| **M2 — Recording audit** | Pending legal | Extend `avoxi.ts` with the 24 h pre-signed recording URL; pipe audio through transcription + redaction; distinguish `voicemail_empty` from `voicemail_left`. |
-| **M3 — Continuous operation** | Deferred | Watch daemon (replaces manual WhatsApp flow), SQLite persistence for deduplication, notifier (Slack/WhatsApp), dashboard for historical browse. |
+| **M1 - MVP** | Implemented in Python | pydantic + httpx + openai SDK + zoneinfo, uv-managed. `uv run audit` produces a narrative for any window. |
+| **M2 - Recording audit** | Pending legal | Extend `avoxi.py` with the 24 h pre-signed recording URL; pipe audio through transcription + redaction; distinguish `voicemail_empty` from `voicemail_left`. |
+| **M3 - Continuous operation** | Deferred | Watch daemon (replaces manual WhatsApp flow), SQLite persistence for deduplication, notifier (Slack/WhatsApp), dashboard for historical browse. |
 
 Every phase adds to the tree; the five MVP module contracts are stable.
 
 ### M1 open items
 
 Before running against production, verify the Avoxi wire field names in
-`avoxi.ts` against a live `/cdrs` response. Known confirmed: `avoxi_call_id`,
-`agent_actions`, `{ data: [...] }` envelope. Fields marked `// TODO(M1)`:
+`avoxi.py` against a live `/cdrs` response. Known confirmed: `avoxi_call_id`,
+`agent_actions`, `{ data: [...] }` envelope. Fields marked `# TODO(M1)`:
 `caller_id`, `dialed_number`, `start_time`, `end_time`, `forwarded_to`,
-`next_cursor`. Drop a sample in `tmp/sample-cdrs.json` to align.
+`next_cursor`, `start_time`/`end_time` query params. Drop a sample in
+`tmp/sample-cdrs.json` to align.
 
 ---
 
@@ -163,16 +181,24 @@ Before running against production, verify the Avoxi wire field names in
 
 Required:
 
-- `AVOXI_API_TOKEN` — bearer token with CDR read scope.
-- `LLM_PROVIDER` — one of `kimi | openai | gemini`.
-- `LLM_API_KEY` — API key for the chosen provider.
-- `LLM_MODEL` — model name (e.g. `moonshot-v1-32k`, `gpt-4o`, `gemini-1.5-pro`).
+- `AVOXI_API_TOKEN` - bearer token with CDR read scope.
+- `LLM_PROVIDER` - one of `kimi | openai | gemini`.
+- `LLM_API_KEY` - API key for the chosen provider.
+- `LLM_MODEL` - model name (e.g. `moonshot-v1-32k`, `gpt-4o`, `gemini-1.5-pro`).
 
 Optional:
 
-- `AVOXI_BASE_URL` — defaults to `https://genius.avoxi.com/api/v2`.
-- `LLM_BASE_URL` — overrides the default base URL for the chosen provider.
-- `COMPANY_NAME` — quoted in the narrative; defaults to `"your company"`.
+- `AVOXI_BASE_URL` - defaults to `https://genius.avoxi.com/api/v2`.
+- `LLM_BASE_URL` - overrides the default base URL for the chosen provider.
+- `COMPANY_NAME` - quoted in the narrative; defaults to `"your company"`.
+- `SCHEDULE_PATH` - overrides the schedule file path. Default:
+  `./config/schedule.yaml` relative to the current working directory.
+
+Run:
+
+```bash
+uv run audit [--since=<iso>] [--until=<iso>]
+```
 
 See `.env.example` for the full list.
 
@@ -180,7 +206,7 @@ See `.env.example` for the full list.
 
 ## 8. Why not just subscribe to Avoxi's own alerts?
 
-Avoxi's alerts (`/alerts/logs`) fire on infrastructure conditions —
+Avoxi's alerts (`/alerts/logs`) fire on infrastructure conditions -
 trunk down, API errors. They don't fire on "a customer called at
 03:17 ART during weeknight on-call and nobody picked up" because that
 isn't a malfunction from Avoxi's point of view. Only our `schedule`
